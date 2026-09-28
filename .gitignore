@@ -1,0 +1,15 @@
+# 模型权重（不上传）
+/models/
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.pth
+
+# 构建产物
+*.xpi
+*.bak
+
+# 编辑器 / Python 缓存
+.vscode/
+__pycache__/
