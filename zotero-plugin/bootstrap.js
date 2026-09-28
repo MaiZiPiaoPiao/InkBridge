@@ -11,18 +11,28 @@ const HTML_NS     = "http://www.w3.org/1999/xhtml";
 
 // ── 翻译模型（HY-MT1.5-1.8B，由 vllm serve --served-model-name hy-mt 提供）──
 const MODEL_NAME  = "hy-mt";
-// 官方 ZH<=>XX 提示词模板，原文前空一行
-const PROMPT_PREFIX = "将以下文本翻译为中文，注意只需要输出翻译后的结果，不要额外解释：\n\n";
+// 官方 ZH<=>XX 提示词模板，原文前空一行；中译英时目标语言为「英语」
+const PROMPT_PREFIX    = "将以下文本翻译为中文，注意只需要输出翻译后的结果，不要额外解释：\n\n";
+const PROMPT_PREFIX_EN = "将以下文本翻译为英语，注意只需要输出翻译后的结果，不要额外解释：\n\n";
 // 官方推荐采样参数
 const SAMPLING = { temperature: 0.7, top_p: 0.6, top_k: 20, repetition_penalty: 1.05 };
 // 输出长度与原文成正比：英文约 4 字符/token，译文 token 数一般不超过原文的 1.5 倍
 const MIN_OUTPUT_TOKENS = 64;
 const MAX_OUTPUT_TOKENS = 2048;
-const MAX_INPUT_CHARS   = 4000;   // 需与 vllm serve --max-model-len 4096 匹配，超出部分截断
+const MAX_INPUT_CHARS    = 4000;   // 需与 vllm serve --max-model-len 4096 匹配，超出部分截断
+const MAX_INPUT_CHARS_ZH = 1500;   // 中文每字约 1 token，译成英文后 token 更多，截断得更早
 
-function outputTokenLimit(text) {
-  const estimate = Math.floor(text.length / 2) + 32;
+// 英译中：英文约 4 字符/token，译文 token 数一般不超过原文的 1.5 倍；中译英：每个汉字约 1.2 个英文 token
+function outputTokenLimit(text, toEnglish = false) {
+  const estimate = Math.floor(text.length * (toEnglish ? 1.2 : 0.5)) + 32;
   return Math.max(MIN_OUTPUT_TOKENS, Math.min(MAX_OUTPUT_TOKENS, estimate));
+}
+
+// 翻译方向：汉字数 ≥ 英文单词数时判为中文（中译英）
+function isChinese(text) {
+  const han = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  const words = (text.match(/[A-Za-z]+/g) || []).length;
+  return han > 0 && han >= words;
 }
 
 // ── 截图翻译（HunyuanOCR-1.5，由 vllm serve --served-model-name hy-ocr 提供）──
@@ -30,13 +40,16 @@ const DEFAULT_OCR_API = "http://127.0.0.1:8002";
 const OCR_MODEL_NAME  = "hy-ocr";
 // 官方 trans_other2zh 任务提示词：先按阅读顺序提取原文（公式为 LaTeX），再输出中文译文
 const OCR_PROMPT = "按照阅读顺序，提取图中文字，公式用latex格式表示，表格用markdown格式表示，再将文字内容翻译为中文。";
+// 官方 trans_other2en 任务：截图是中文时改用它译成英文
+const OCR_PROMPT_EN = "按照阅读顺序，提取图中文字，公式用latex格式表示，表格用markdown格式表示，再将文字内容翻译为英文。";
+const OCR_DETECT_CHARS = 20;   // 识别出这么多个非公式字符后判断截图语言
 // 官方客户端采样参数（贪心解码）
 const OCR_SAMPLING = { temperature: 0, top_p: 1.0, top_k: -1, repetition_penalty: 1.08, skip_special_tokens: true };
 const OCR_MAX_TOKENS = 4096;   // 原文 + 译文；需与 vllm serve --max-model-len 8192 配套
 const OCR_MAX_SIDE   = 2048;   // 截图长边超过该像素时等比缩小，控制图像 token 数
-// 模型输出格式："图中的文字是\n<原文>\n翻译成中文为\n<译文>"
+// 模型输出格式："图中的文字是\n<原文>\n翻译成中文为\n<译文>"（译成英文时标记为 OCR_TRANS_MARKS 中的另一个）
 const OCR_SRC_MARK   = "图中的文字是";
-const OCR_TRANS_MARK = "翻译成中文为";
+const OCR_TRANS_MARKS = ["翻译成中文为", "翻译成英文为"];
 
 const PING_INTERVAL_MS = 2 * 60 * 1000;   // 顶部服务状态圆点的检测间隔
 
@@ -848,8 +861,40 @@ function appendDictMsg(panel, { entry, lemma }) {
   scrollTurnToTop(panel);
 }
 
+// 汉英查词结果卡：每个英文候选一行（单词、音标、标签），下方是包含查询词的那条释义，查询词高亮
+function appendZhDictMsg(panel, { term, candidates }) {
+  const doc = panel.els.messages.ownerDocument;
+  const view = { source: term, translation: candidates.map(c => c.word).join(", ") };
+  const rows = candidates.map(c => {
+    const badges = c.tag.split(/\s+/).filter(t => DICT_TAGS[t]).map(t => DICT_TAGS[t]);
+    if (c.collins) badges.push("★".repeat(c.collins));
+    const line = c.translation.split("\n").find(l => l.includes(term)) || "";
+    return h(doc, "div", { className: "ait-zh-cand" }, [
+      h(doc, "div", { className: "ait-dict-head" }, [
+        h(doc, "span", { className: "ait-zh-word", text: c.word }),
+        c.phonetic ? h(doc, "span", { className: "ait-dict-phonetic", text: `/${c.phonetic}/` }) : null,
+        ...badges.map(b => h(doc, "span", { className: "ait-dict-badge", text: b })),
+      ]),
+      h(doc, "div", { className: "ait-zh-sense" }, line.split(term).flatMap((part, i) =>
+        [i ? h(doc, "mark", { text: term }) : null, part])),
+    ]);
+  });
+  const actions = copyActions(doc, view);
+  actions.hidden = false;
+  const card = h(doc, "div", { className: "ait-msg ait-msg-ai" }, [
+    h(doc, "div", { className: "ait-msg-header" }, [
+      h(doc, "span", { className: "ait-avatar", text: "词" }),
+      h(doc, "span", { className: "ait-msg-label", text: "汉英词典" }),
+    ]),
+    h(doc, "div", { className: "ait-msg-content ait-dict" }, rows),
+    actions,
+  ]);
+  (panel.els.turn || startTurn(panel)).appendChild(card);
+  scrollTurnToTop(panel);
+}
+
 // 文本翻译结果卡：译文 + 复制按钮
-function appendAiMsg(panel, source) {
+function appendAiMsg(panel, source, label = "译文") {
   const doc = panel.els.messages.ownerDocument;
   const view = { source, translation: "" };
   view.content = h(doc, "div", { className: "ait-msg-content ait-streaming" });
@@ -860,7 +905,7 @@ function appendAiMsg(panel, source) {
   const card = h(doc, "div", { className: "ait-msg ait-msg-ai" }, [
     h(doc, "div", { className: "ait-msg-header" }, [
       h(doc, "span", { className: "ait-avatar", text: "AI" }),
-      h(doc, "span", { className: "ait-msg-label", text: "译文" }),
+      h(doc, "span", { className: "ait-msg-label", text: label }),
     ]),
     view.content,
     view.actions,
@@ -916,11 +961,16 @@ async function sendMessage(panel, userText) {
 
   appendUserMsg(panel, userText);
 
-  // 单词 / 短语：先查离线词典，查到就显示全部词义；查不到或未配置词典时交给翻译模型
+  // 汉字为主判为中译英，否则英译中
+  const toEnglish = isChinese(userText);
+
+  // 单词 / 短语：先查离线词典（中文词查英文候选，英文词查全部词义）；查不到或未配置词典时交给翻译模型
   try {
-    const hit = await lookupDict(panel.state.dictPath, userText);
+    const hit = toEnglish
+      ? await lookupZh(panel.state.dictPath, userText)
+      : await lookupDict(panel.state.dictPath, userText);
     if (hit) {
-      appendDictMsg(panel, hit);
+      (toEnglish ? appendZhDictMsg : appendDictMsg)(panel, hit);
       setStatus(panel, "查词完成", false);
       panel.state.pending = false;
       return;
@@ -930,18 +980,18 @@ async function sendMessage(panel, userText) {
   }
 
   // 追加 AI 回复卡（带光标）
-  const view = appendAiMsg(panel, userText.trim());
+  const view = appendAiMsg(panel, userText.trim(), toEnglish ? "译文（英）" : "译文");
   setStatus(panel, "翻译中…", true);
 
   let aiText = "";
 
   try {
-    const source = userText.trim().slice(0, MAX_INPUT_CHARS);
+    const source = userText.trim().slice(0, toEnglish ? MAX_INPUT_CHARS_ZH : MAX_INPUT_CHARS);
     const url  = panel.state.apiBase + "/v1/chat/completions";
     const body = JSON.stringify({
       model:      MODEL_NAME,
-      messages:   [{ role: "user", content: PROMPT_PREFIX + source }],
-      max_tokens: outputTokenLimit(source),
+      messages:   [{ role: "user", content: (toEnglish ? PROMPT_PREFIX_EN : PROMPT_PREFIX) + source }],
+      max_tokens: outputTokenLimit(source, toEnglish),
       stream:     true,
       ...SAMPLING,
     });
@@ -975,7 +1025,7 @@ async function sendMessage(panel, userText) {
 
 // ── 查词（ECDICT 离线词典，由 tools/build_ecdict.py 生成）────────────────────
 
-const DICT_FORMAT = "ai-paper-ecdict-1";   // build_ecdict.py 写入 meta 表的格式标识
+const DICT_FORMAT = "ai-paper-ecdict-2";   // build_ecdict.py 写入 meta 表的格式标识（2：含中文反查索引）
 // 单词或不超过 4 个词的短语（如 take off）才查词典，其余交给翻译模型
 const LOOKUP_RE = /^[A-Za-z]+(?:['-][A-Za-z]+)*(?: [A-Za-z]+(?:['-][A-Za-z]+)*){0,3}$/;
 const DICT_TAGS  = { zk: "中考", gk: "高考", cet4: "四级", cet6: "六级", ky: "考研", toefl: "托福", ielts: "雅思", gre: "GRE" };
@@ -986,8 +1036,14 @@ const DICT_FORMS = new Map([["s", "复数"], ["p", "过去式"], ["d", "过去�
 const DICT_SQL = "SELECT word, phonetic, translation, collins, oxford, tag, exchange FROM ecdict " +
                  "WHERE sw = :sw ORDER BY (word = :w) DESC, (word = :sw) DESC LIMIT 1";
 
-// 当前词典连接。打开失败时清空 promise，下次查询会重试（例如词典文件稍后才生成）
-var dict = { path: "", promise: null };
+// 中文词反查：1–8 个汉字，按 zh_index 的排序分取前 8 个英文候选
+const ZH_LOOKUP_RE = /^[\u4e00-\u9fff]{1,8}$/;
+const ZH_SQL = "SELECT z.word, e.phonetic, e.translation, e.collins, e.oxford, e.tag FROM zh_index z " +
+               "JOIN ecdict e ON e.sw = z.word AND e.word = z.word WHERE z.term = :t ORDER BY z.score LIMIT 8";
+
+// 当前词典连接。打开失败时清空 promise，下次查询会重试（例如词典文件稍后才生成）。
+// oldFormat：选中的是旧版脚本生成的词典，需要重新运行 build_ecdict.py
+var dict = { path: "", promise: null, oldFormat: false };
 
 function openDict(path) {
   if (!path) return Promise.resolve(null);
@@ -999,7 +1055,9 @@ function openDict(path) {
       const { Sqlite } = ChromeUtils.importESModule("resource://gre/modules/Sqlite.sys.mjs");
       const conn = await Sqlite.openConnection({ path, readOnly: true });
       const rows = await conn.execute("SELECT value FROM meta WHERE key = 'format'");
-      if (rows[0]?.getResultByName("value") === DICT_FORMAT) return conn;
+      const format = rows[0]?.getResultByName("value") || "";
+      if (format === DICT_FORMAT) return conn;
+      if (dict.promise === promise) dict.oldFormat = format.startsWith("ai-paper-ecdict-");
       await conn.close();
     } catch (e) {
       Zotero.debug(`[AI Translate] 词典打开失败: ${e}`);
@@ -1007,13 +1065,13 @@ function openDict(path) {
     if (dict.promise === promise) dict.promise = null;
     return null;
   })();
-  dict = { path, promise };
+  dict = { path, promise, oldFormat: false };
   return promise;
 }
 
 function closeDict() {
   const { promise } = dict;
-  dict = { path: "", promise: null };
+  dict = { path: "", promise: null, oldFormat: false };
   promise?.then(conn => conn?.close()).catch(() => {});
 }
 
@@ -1067,6 +1125,24 @@ async function lookupDict(path, text) {
   return { entry, lemma };
 }
 
+// 选中 / 输入的是中文词时返回 { term, candidates }，否则返回 null（交给翻译模型中译英）
+async function lookupZh(path, text) {
+  const term = text.replace(/[\s\p{P}]/gu, "");
+  if (!ZH_LOOKUP_RE.test(term)) return null;
+  const conn = await openDict(path);
+  if (!conn) return null;
+  const rows = await conn.executeCached(ZH_SQL, { t: term });
+  if (!rows.length) return null;
+  const candidates = rows.map(r => {
+    const get = key => r.getResultByName(key);
+    return {
+      word: get("word"), phonetic: get("phonetic") || "", translation: get("translation") || "",
+      collins: get("collins") || 0, oxford: get("oxford") || 0, tag: get("tag") || "",
+    };
+  });
+  return { term, candidates };
+}
+
 // ── 截图翻译 ──────────────────────────────────────────────────────────────────
 
 // 从剪贴板 / 拖放数据中取第一张图片
@@ -1110,16 +1186,22 @@ function splitOcrOutput(raw) {
   if (OCR_SRC_MARK.startsWith(lead)) return { source: "", translation: "", hasTranslation: false };
   if (lead.startsWith(OCR_SRC_MARK)) text = lead.slice(OCR_SRC_MARK.length).replace(/^[：:]/, "");
 
-  const i = text.indexOf(OCR_TRANS_MARK);
+  let i = -1, mark = "";
+  for (const m of OCR_TRANS_MARKS) {
+    const j = text.indexOf(m);
+    if (j >= 0 && (i < 0 || j < i)) { i = j; mark = m; }
+  }
   if (i < 0) {
-    for (let k = OCR_TRANS_MARK.length - 1; k > 0; k--) {
-      if (text.endsWith(OCR_TRANS_MARK.slice(0, k))) { text = text.slice(0, -k); break; }
-    }
+    const hide = Math.max(0, ...OCR_TRANS_MARKS.map(m => {
+      for (let k = m.length - 1; k > 0; k--) if (text.endsWith(m.slice(0, k))) return k;
+      return 0;
+    }));
+    if (hide) text = text.slice(0, -hide);
     return { source: text.trim(), translation: "", hasTranslation: false };
   }
   return {
     source:         text.slice(0, i).trim(),
-    translation:    text.slice(i + OCR_TRANS_MARK.length).replace(/^[：:]/, "").trim(),
+    translation:    text.slice(i + mark.length).replace(/^[：:]/, "").trim(),
     hasTranslation: true,
   };
 }
@@ -1158,7 +1240,7 @@ function appendOcrMsg(panel) {
   const card = h(doc, "div", { className: "ait-msg ait-msg-ai" }, [
     h(doc, "div", { className: "ait-msg-header" }, [
       h(doc, "span", { className: "ait-avatar", text: "AI" }),
-      h(doc, "span", { className: "ait-msg-label", text: "截图翻译" }),
+      view.label = h(doc, "span", { className: "ait-msg-label", text: "截图翻译" }),
     ]),
     view.content,
     view.actions,
@@ -1200,13 +1282,13 @@ async function sendImage(panel, file) {
     setStatus(panel, "识别中…", true);
 
     const url  = panel.state.ocrApiBase + "/v1/chat/completions";
-    const body = JSON.stringify({
+    const body = prompt => JSON.stringify({
       model:    OCR_MODEL_NAME,
       messages: [
         { role: "system", content: "" },
         { role: "user", content: [
           { type: "image_url", image_url: { url: dataURL } },
-          { type: "text", text: OCR_PROMPT },
+          { type: "text", text: prompt },
         ] },
       ],
       max_tokens: OCR_MAX_TOKENS,
@@ -1214,13 +1296,31 @@ async function sendImage(panel, file) {
       ...OCR_SAMPLING,
     });
 
-    let raw = "";
-    const finishReason = await xhrSSE(url, body, chunk => {
+    // 先按译成中文识别；识别出足够原文后判断一次语言，是中文就中止并改用 trans_other2en 重新请求
+    let raw = "", checked = false;
+    const onChunk = chunk => {
       raw += chunk;
       const parts = splitOcrOutput(raw);
+      if (!checked) {
+        const text = parts.source.replace(MATH_RE, " ");   // 公式里的 \mathbf 等不参与语言判断
+        if (text.replace(/\s/g, "").length >= OCR_DETECT_CHARS || parts.hasTranslation) {
+          checked = true;
+          if (isChinese(text)) return "stop";
+        }
+      }
       if (parts.hasTranslation) setStatus(panel, "翻译中…", true);
       renderOcr(view, doc, parts, true);
-    });
+    };
+    let finishReason = await xhrSSE(url, body(OCR_PROMPT), onChunk);
+    if (finishReason === "stopped") {
+      raw = "";
+      view.label.textContent = "截图翻译（英）";
+      view.details.open = true;
+      view.collapsed = false;
+      renderOcr(view, doc, { source: "", translation: "", hasTranslation: false }, true);
+      setStatus(panel, "检测到中文，改为译成英文…", true);
+      finishReason = await xhrSSE(url, body(OCR_PROMPT_EN), onChunk);
+    }
 
     const parts = splitOcrOutput(raw);
     renderOcr(view, doc, parts, false);
@@ -1302,7 +1402,7 @@ async function pickDict(panel) {
     panel.els.showDictName();
     await refreshEndpoint(panel, "dictPath");
     const ok = panel.els.endpoints.dictPath.dot.classList.contains("is-up");
-    setStatus(panel, ok ? "词典已加载" : "词典无效", false);
+    setStatus(panel, ok ? "词典已加载" : dict.oldFormat ? "词典需重新生成" : "词典无效", false);
   } catch (e) {
     Zotero.debug(`[AI Translate] 选择词典失败: ${e}`);
     setStatus(panel, "选择词典失败", false);
@@ -1358,7 +1458,10 @@ function xhrSSE(url, jsonBody, onChunk) {
         if (json.error) { settle(() => reject(new Error(json.error.message || "stream error"))); return; }
         const choice = json.choices?.[0];
         if (choice?.delta?.content) {
-          try { onChunk(choice.delta.content); } catch (_) {}  // 隔离 UI 更新异常，不中止流
+          let result;
+          try { result = onChunk(choice.delta.content); } catch (_) {}  // 隔离 UI 更新异常，不中止流
+          // 回调要求停止：正常返回 "stopped"，不当作错误
+          if (result === "stop") { settle(() => resolve("stopped")); try { xhr.abort(); } catch (_) {} return; }
         }
         if (choice?.finish_reason) finishReason = choice.finish_reason;
       }
