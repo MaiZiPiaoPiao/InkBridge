@@ -20,22 +20,25 @@ Zotero 插件  ──HTTP/SSE──▶  vLLM (127.0.0.1:8001, OpenAI 兼容接�
 
 ```bash
 conda activate vllm
-vllm serve ~/models/HY-MT1.5-1.8B \
+env VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve ~/Extension/models/HY-MT1.5-1.8B \
     --served-model-name hy-mt \
     --host 127.0.0.1 --port 8001 \
     --max-model-len 4096 \
-    --gpu-memory-utilization 0.5
+    --gpu-memory-utilization 0.5 \
+    --enforce-eager
 ```
 
-看到 `Application startup complete` 后即可在 Zotero 中使用。
+看到 `Application startup complete` 后即可在 Zotero 中使用（约 45 秒）。启动后第一次翻译较长文本时，Triton 会现场编译内核，可能卡几十秒，之后每段约 0.5~1 秒。
 
-- `--served-model-name hy-mt` 必须与 `bootstrap.js` 中的 `MODEL_NAME` 一致。换模型（如 HY-MT1.5-7B-GPTQ-Int4）只需改模型路径，插件无需修改。
+- `--served-model-name hy-mt` 必须与 `bootstrap.js` 中的 `MODEL_NAME` 一致。
 - `--max-model-len 4096` 与插件的 `MAX_INPUT_CHARS = 4000` 配套；调小它时要同步调小插件的截断长度。
+- `--enforce-eager`：必需。vLLM 0.30 没有 HunYuan 稠密模型的原生实现，会回退到 transformers 实现；其 dynamic RoPE 在每次前向时做数据相关判断，与 CUDA 图捕获冲突（`operation not permitted when stream is capturing`）。
+- `VLLM_USE_FLASHINFER_SAMPLER=0`：本机没有 `nvcc`，FlashInfer 的 top-k/top-p 采样内核无法 JIT 编译（`Could not find nvcc`），改用 PyTorch 实现。
 
 模型下载：
 
 ```bash
-modelscope download --model Tencent-Hunyuan/HY-MT1.5-1.8B --local_dir ~/models/HY-MT1.5-1.8B
+modelscope download --model Tencent-Hunyuan/HY-MT1.5-1.8B --local_dir ~/Extension/models/HY-MT1.5-1.8B
 ```
 
 ## 翻译参数
@@ -57,7 +60,7 @@ modelscope download --model Tencent-Hunyuan/HY-MT1.5-1.8B --local_dir ~/models/H
 ## 本地开发侧载
 
 1. 在 Zotero 配置目录（`~/.zotero/zotero/<profile>/`）的 `extensions` 文件夹中，创建一个名为 `ai-paper-reader@maipeng.com` 的文本文件。
-2. 文件内容写入本目录的绝对路径：
+2. 文件内容写入 `zotero-plugin/` 目录的绝对路径：
 
    ```text
    /home/maipeng/Extension/zotero-plugin
