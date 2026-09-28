@@ -38,6 +38,8 @@ const OCR_MAX_SIDE   = 2048;   // 截图长边超过该像素时等比缩小，�
 const OCR_SRC_MARK   = "图中的文字是";
 const OCR_TRANS_MARK = "翻译成中文为";
 
+const PING_INTERVAL_MS = 2 * 60 * 1000;   // 顶部服务状态圆点的检测间隔
+
 var chromeHandle = null;
 var styleSheetSvc = null;
 var styleURI = null;
@@ -176,6 +178,9 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
     onReaderSelection,
     ADDON_ID
   );
+
+  // 7. 已打开的主窗口挂上 F 快捷键（之后打开的窗口在 onMainWindowLoad 中挂）
+  for (const win of Zotero.getMainWindows?.() || []) attachKeyHandler(win);
 }
 
 async function onMainWindowLoad({ window }) {
@@ -183,6 +188,8 @@ async function onMainWindowLoad({ window }) {
   try {
     window.MozXULElement?.insertFTLIfNeeded(`${ADDON_REF}.ftl`);
   } catch (_) {}
+  // 焦点在主窗口（如点过翻译面板）时也能按 F 翻译
+  attachKeyHandler(window);
 }
 
 async function onMainWindowUnload({ window }) {}
@@ -207,8 +214,10 @@ function shutdown({ id, version, resourceURI, rootURI }, reason) {
     L10nRegistry.getInstance().removeSources([ADDON_REF]);
   } catch (_) {}
 
+  detachKeyHandlers();
   for (const panel of panels.values()) disposePanel(panel);
   panels.clear();
+  closeDict();
   katex = null;
 
   if (chromeHandle) { chromeHandle.destruct(); chromeHandle = null; }
@@ -220,7 +229,25 @@ function onReaderSelection(event) {
   const text = getSelectionText(event);
   if (!text) return;
 
-  // 在弹出菜单中添加提示
+  // 阅读器窗口及其中的 PDF 视图 iframe 挂上 F 快捷键（视图可能重建，每次选中时补挂）
+  try {
+    const readerWin = event.reader?._iframeWindow || event.doc?.defaultView;
+    attachKeyHandler(readerWin);
+    for (const frame of readerWin?.document?.querySelectorAll("iframe") || []) {
+      attachKeyHandler(frame.contentWindow);
+    }
+  } catch (_) {}
+
+  let merged = 0;   // 非自动模式下，本次选中是待翻译文本的第几段
+  for (const panel of panels.values()) {
+    if (panel.state.autoTranslate) {
+      sendMessage(panel, text);
+    } else {
+      merged = Math.max(merged, appendSelection(panel, text));
+    }
+  }
+
+  // 在选中弹窗中添加提示
   try {
     const note = event.doc.createElement("div");
     note.style.cssText =
@@ -228,24 +255,79 @@ function onReaderSelection(event) {
       "background:#f0f7ff;color:#2b6fd6;font-size:11px;";
     note.textContent = getPref("autoTranslate", true) !== false
       ? "已发送至 AI 翻译"
-      : "AI 翻译：自动翻译已关闭";
+      : getPref("mergeSelections", false) === true
+        ? `已加入待翻译（第 ${merged} 段）· 按 F 翻译`
+        : "已放入输入框 · 按 F 翻译";
     event.append(note);
   } catch (_) {}
+}
 
-  // 通知所有活跃面板
-  for (const panel of panels.values()) {
-    if (panel.state.autoTranslate) {
-      sendMessage(panel, text);
-    } else {
-      // 关闭自动翻译：把选中文字放入输入框，按 Enter 再翻译
-      if (panel.els.textarea) {
-        panel.els.textarea.value = text;
-        panel.els.textarea.dispatchEvent(new Event("input"));
-        try { panel.els.textarea.focus(); } catch (_) {}
-      }
-      setStatus(panel, "已放入输入框", false);
-    }
+// 跨页合并：上一段以"字母-"结尾且下一段以小写字母开头时视为断词，去掉连字符直接拼接；否则用空格连接
+function mergeSelection(prev, next) {
+  prev = prev.replace(/\s+$/, "");
+  next = next.replace(/^\s+/, "");
+  if (!prev) return next;
+  if (/[A-Za-z]-$/.test(prev) && /^[a-z]/.test(next)) return prev.slice(0, -1) + next;
+  return prev + " " + next;
+}
+
+// 非自动模式：把选中文字放入输入框，返回当前段数。
+// 开启「合并」时追加到已有内容后面，否则替换。不抢焦点，否则按 F 会输入到输入框里
+function appendSelection(panel, text) {
+  const ta = panel.els.textarea;
+  if (!ta) return 0;
+  const merge = panel.state.mergeSelections && !!ta.value.trim();
+  // 同一选区的弹窗可能重复渲染，忽略与上一段相同的文本
+  if (merge && text === panel.state.lastSegment) return panel.state.segments;
+  ta.value = merge ? mergeSelection(ta.value, text) : text;
+  panel.state.lastSegment = text;
+  panel.state.segments = merge ? panel.state.segments + 1 : 1;
+  ta.dispatchEvent(new ta.ownerDocument.defaultView.Event("input"));
+  setStatus(panel, panel.state.segments > 1
+    ? `已合并 ${panel.state.segments} 段 · 按 F 翻译`
+    : "已放入输入框 · 按 F 翻译", false);
+  return panel.state.segments;
+}
+
+// ── F 快捷键（非自动模式下翻译输入框中的待翻译文本）──────────────────────────
+
+const keyWindows = new Set();
+
+function attachKeyHandler(win) {
+  if (!win || keyWindows.has(win)) return;
+  // 清理已关闭的窗口（iframe 销毁后访问会抛 dead object）
+  for (const w of keyWindows) {
+    try { if (w.closed) keyWindows.delete(w); } catch (_) { keyWindows.delete(w); }
   }
+  win.addEventListener("keydown", onTranslateKey, true);
+  keyWindows.add(win);
+}
+
+function detachKeyHandlers() {
+  for (const w of keyWindows) {
+    try { w.removeEventListener("keydown", onTranslateKey, true); } catch (_) {}
+  }
+  keyWindows.clear();
+}
+
+function isEditable(el) {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  return ["input", "textarea", "select"].includes(el.localName);
+}
+
+function onTranslateKey(e) {
+  if (e.key !== "f" || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey || e.repeat || e.isComposing) return;
+  // 正在输入框、批注编辑框等处打字时不拦截
+  if (isEditable(e.target) || isEditable(e.target?.ownerDocument?.activeElement)) return;
+  let handled = false;
+  for (const panel of panels.values()) {
+    if (panel.state.autoTranslate || panel.state.pending || !panel.els.textarea?.value.trim()) continue;
+    submitFromInput(panel);
+    handled = true;
+  }
+  // 没有待翻译文本时不拦截，F 保持原有行为
+  if (handled) { e.preventDefault(); e.stopPropagation(); }
 }
 
 function getSelectionText(event) {
@@ -471,11 +553,15 @@ function buildUI(body, doc) {
     uid,
     pending:       false,
     autoTranslate: getPref("autoTranslate", true) !== false,
+    mergeSelections: getPref("mergeSelections", false) === true,   // 非自动模式下多次选中是否合并
     apiBase:       (() => {
       const v = (getPref("apiBase", DEFAULT_API) || DEFAULT_API).replace(/\/+$/, "");
       return v === LEGACY_API ? DEFAULT_API : v;
     })(),
     ocrApiBase:    (getPref("ocrApiBase", DEFAULT_OCR_API) || DEFAULT_OCR_API).replace(/\/+$/, ""),
+    dictPath:      getPref("dictPath", "") || "",   // ECDICT 词典文件（build_ecdict.py 生成）
+    segments:      0,    // 非自动模式下输入框中已合并的选中段数
+    lastSegment:   "",   // 上一次合并的选中文本，用于忽略重复事件
   };
   const els = {};
   panels.set(uid, { state, els });
@@ -484,12 +570,29 @@ function buildUI(body, doc) {
   els.statusDot  = h(doc, "span", { className: "ait-dot" });
   els.statusText = h(doc, "span", { className: "ait-status", text: "就绪" });
 
-  const autoCheck = h(doc, "input", { type: "checkbox" });
-  autoCheck.checked = state.autoTranslate;
-  autoCheck.addEventListener("change", () => {
-    state.autoTranslate = autoCheck.checked;
-    setPref("autoTranslate", autoCheck.checked);
-  });
+  // 开关：状态保存到 state[key] 和同名偏好
+  const toggle = (key, label, onChange) => {
+    const input = h(doc, "input", { type: "checkbox" });
+    input.checked = state[key];
+    input.addEventListener("change", () => {
+      state[key] = input.checked;
+      setPref(key, input.checked);
+      onChange?.();
+    });
+    const el = h(doc, "label", { className: "ait-toggle" }, [input,
+      h(doc, "span", { className: "ait-toggle-track" }),
+      h(doc, "span", { className: "ait-toggle-label", text: label }),
+    ]);
+    return { el, input };
+  };
+  // 「合并」只在非自动模式下起作用，自动模式时置灰
+  const syncMerge = () => {
+    mergeToggle.input.disabled = state.autoTranslate;
+    mergeToggle.el.classList.toggle("is-disabled", state.autoTranslate);
+  };
+  const autoToggle  = toggle("autoTranslate", "自动", syncMerge);
+  const mergeToggle = toggle("mergeSelections", "合并");
+  syncMerge();
 
   // 服务地址胶囊：● 名称 地址。显示时省略 http://；回车或失焦后保存，清空恢复默认
   els.endpoints = {};
@@ -520,6 +623,20 @@ function buildUI(body, doc) {
   const transChip = endpoint("apiBase", "翻译", DEFAULT_API);
   const ocrChip   = endpoint("ocrApiBase", "OCR", DEFAULT_OCR_API);
 
+  // 词典胶囊：● 词典 文件名，点击选择 build_ecdict.py 生成的 .db 文件
+  const dictDot  = h(doc, "span", { className: "ait-endpoint-dot" });
+  const dictName = h(doc, "span", { className: "ait-endpoint-file" });
+  els.showDictName = () => {
+    dictName.textContent = state.dictPath ? state.dictPath.split(/[\\/]/).pop() : "点击选择";
+    dictName.classList.toggle("is-empty", !state.dictPath);
+  };
+  els.showDictName();
+  els.endpoints.dictPath = { dot: dictDot };
+  const dictChip = h(doc, "button", {
+    className: "ait-endpoint ait-endpoint-btn", type: "button",
+    onclick: () => pickDict({ state, els }),
+  }, [dictDot, h(doc, "span", { className: "ait-endpoint-label", text: "词典" }), dictName]);
+
   const clearBtn = h(doc, "button", {
     className: "ait-action-btn ait-action-ghost", type: "button", text: "清空",
     onclick: () => panelClear({ state, els }),
@@ -534,14 +651,12 @@ function buildUI(body, doc) {
       ]),
       h(doc, "div", { className: "ait-topbar-right" }, [
         els.statusText,
-        h(doc, "label", { className: "ait-toggle" }, [autoCheck,
-          h(doc, "span", { className: "ait-toggle-track" }),
-          h(doc, "span", { className: "ait-toggle-label", text: "自动" }),
-        ]),
+        autoToggle.el,
+        mergeToggle.el,
         clearBtn,
       ]),
     ]),
-    h(doc, "div", { className: "ait-endpoints" }, [transChip, ocrChip]),
+    h(doc, "div", { className: "ait-endpoints" }, [transChip, ocrChip, dictChip]),
   ]);
 
   // ── 消息区（空状态 + 动态卡片）──
@@ -549,6 +664,7 @@ function buildUI(body, doc) {
     h(doc, "div", { className: "ait-empty-icon", text: "✦" }),
     h(doc, "div", { text: "在 PDF 中选中英文，或在下方输入" }),
     h(doc, "div", { className: "ait-empty-sub", text: "截图后在输入框 Ctrl+V，可翻译含公式的内容" }),
+    h(doc, "div", { className: "ait-empty-sub", text: "关闭「自动」后按 F 翻译，打开「合并」可把多次选中合在一起" }),
   ]);
   els.messages = h(doc, "div", { className: "ait-messages" }, [els.empty]);
 
@@ -568,6 +684,7 @@ function buildUI(body, doc) {
   els.textarea.addEventListener("input", () => {
     els.textarea.style.height = "auto";
     els.textarea.style.height = Math.min(els.textarea.scrollHeight, 120) + "px";
+    if (!els.textarea.value.trim()) { state.segments = 0; state.lastSegment = ""; }
   });
 
   els.sendBtn = h(doc, "button", {
@@ -614,15 +731,16 @@ function buildUI(body, doc) {
     els.messagesRO.observe(els.messages);
   }
 
-  // 每 15 秒检测两个服务是否可用，更新地址胶囊上的圆点
+  // 每 2 分钟检测两个服务是否可用，更新地址胶囊上的圆点（每次翻译结束后也会立即检测）
   const refreshAll = () => {
     if (!els.messages.isConnected) return;
     refreshEndpoint({ state, els }, "apiBase");
     refreshEndpoint({ state, els }, "ocrApiBase");
+    refreshEndpoint({ state, els }, "dictPath");
   };
   refreshAll();
   els.win = win;
-  els.pingTimer = win?.setInterval(refreshAll, 15000);
+  els.pingTimer = win?.setInterval(refreshAll, PING_INTERVAL_MS);
 }
 
 // ── 消息卡片 ──────────────────────────────────────────────────────────────────
@@ -679,6 +797,57 @@ function copyActions(doc, view) {
   return h(doc, "div", { className: "ait-card-actions", hidden: "" }, [copySrc, copyTrans]);
 }
 
+// 词典卡片的一个词条：单词 + 音标 + 标签，按词性分行的全部释义，词形变化
+function dictEntryNodes(doc, entry, isLemma) {
+  const nodes = [];
+  const badges = entry.tag.split(/\s+/).filter(t => DICT_TAGS[t]).map(t => DICT_TAGS[t]);
+  if (entry.collins) badges.push("★".repeat(entry.collins));
+  if (entry.oxford) badges.push("牛津3000");
+  nodes.push(h(doc, "div", { className: "ait-dict-head" }, [
+    isLemma ? h(doc, "span", { className: "ait-dict-lemma-tag", text: "原形" }) : null,
+    h(doc, "span", { className: isLemma ? "ait-dict-word is-lemma" : "ait-dict-word", text: entry.word }),
+    entry.phonetic ? h(doc, "span", { className: "ait-dict-phonetic", text: `/${entry.phonetic}/` }) : null,
+    ...badges.map(b => h(doc, "span", { className: "ait-dict-badge", text: b })),
+  ]));
+  // 每行一个义项，行首的 "n." "vt." "[计]" 等作为词性/领域标签
+  for (const line of entry.translation.split("\n").map(l => l.trim()).filter(Boolean)) {
+    const m = line.match(/^((?:[a-z]+\.)+|\[[^\]]+\])\s*(.*)$/);
+    nodes.push(h(doc, "div", { className: "ait-dict-sense" }, m
+      ? [h(doc, "span", { className: "ait-dict-pos", text: m[1] }), h(doc, "span", { text: m[2] })]
+      : [h(doc, "span", { text: line })]));
+  }
+  const { forms } = parseExchange(entry.exchange);
+  if (forms.length && !isLemma) {
+    nodes.push(h(doc, "div", { className: "ait-dict-forms" },
+      forms.flatMap((f, i) => [i ? " · " : null, f.name + " ", h(doc, "b", { text: f.value })])));
+  }
+  return nodes;
+}
+
+// 查词结果卡：词条 + 原形词条（如有）+ 复制按钮
+function appendDictMsg(panel, { entry, lemma }) {
+  const doc = panel.els.messages.ownerDocument;
+  const text = [entry, lemma].filter(e => e?.translation)
+    .map(e => (e === lemma ? `原形 ${e.word}\n` : "") + e.translation).join("\n\n");
+  const view = { source: entry.word, translation: text };
+  const content = h(doc, "div", { className: "ait-msg-content ait-dict" }, [
+    ...(entry.translation || entry.phonetic ? dictEntryNodes(doc, entry, false) : []),
+    ...(lemma?.translation ? [h(doc, "div", { className: "ait-dict-lemma" }, dictEntryNodes(doc, lemma, true))] : []),
+  ]);
+  const actions = copyActions(doc, view);
+  actions.hidden = false;
+  const card = h(doc, "div", { className: "ait-msg ait-msg-ai" }, [
+    h(doc, "div", { className: "ait-msg-header" }, [
+      h(doc, "span", { className: "ait-avatar", text: "词" }),
+      h(doc, "span", { className: "ait-msg-label", text: "词典" }),
+    ]),
+    content,
+    actions,
+  ]);
+  (panel.els.turn || startTurn(panel)).appendChild(card);
+  scrollTurnToTop(panel);
+}
+
 // 文本翻译结果卡：译文 + 复制按钮
 function appendAiMsg(panel, source) {
   const doc = panel.els.messages.ownerDocument;
@@ -718,6 +887,8 @@ function disposePanel(panel) {
 
 function panelClear(panel) {
   panel.state.pending      = false;
+  panel.state.segments     = 0;
+  panel.state.lastSegment  = "";
   if (panel.els.textarea) { panel.els.textarea.value = ""; panel.els.textarea.style.height = ""; }
   panel.els.messages?.replaceChildren(panel.els.empty);
   panel.els.turn = null;
@@ -731,6 +902,8 @@ function submitFromInput(panel) {
   if (!text) return;
   panel.els.textarea.value = "";
   panel.els.textarea.style.height = "";
+  panel.state.segments = 0;
+  panel.state.lastSegment = "";
   sendMessage(panel, text);
 }
 
@@ -742,6 +915,19 @@ async function sendMessage(panel, userText) {
   if (!doc) { panel.state.pending = false; return; }
 
   appendUserMsg(panel, userText);
+
+  // 单词 / 短语：先查离线词典，查到就显示全部词义；查不到或未配置词典时交给翻译模型
+  try {
+    const hit = await lookupDict(panel.state.dictPath, userText);
+    if (hit) {
+      appendDictMsg(panel, hit);
+      setStatus(panel, "查词完成", false);
+      panel.state.pending = false;
+      return;
+    }
+  } catch (e) {
+    Zotero.debug(`[AI Translate] 查词失败: ${e}`);
+  }
 
   // 追加 AI 回复卡（带光标）
   const view = appendAiMsg(panel, userText.trim());
@@ -785,6 +971,100 @@ async function sendMessage(panel, userText) {
 
   refreshEndpoint(panel, "apiBase");
   panel.state.pending = false;
+}
+
+// ── 查词（ECDICT 离线词典，由 tools/build_ecdict.py 生成）────────────────────
+
+const DICT_FORMAT = "ai-paper-ecdict-1";   // build_ecdict.py 写入 meta 表的格式标识
+// 单词或不超过 4 个词的短语（如 take off）才查词典，其余交给翻译模型
+const LOOKUP_RE = /^[A-Za-z]+(?:['-][A-Za-z]+)*(?: [A-Za-z]+(?:['-][A-Za-z]+)*){0,3}$/;
+const DICT_TAGS  = { zk: "中考", gk: "高考", cet4: "四级", cet6: "六级", ky: "考研", toefl: "托福", ielts: "雅思", gre: "GRE" };
+// 用 Map 保证显示顺序（普通对象会把数字键 "3" 排到最前）
+const DICT_FORMS = new Map([["s", "复数"], ["p", "过去式"], ["d", "过去分词"], ["i", "现在分词"],
+                            ["3", "三单"], ["r", "比较级"], ["t", "最高级"]]);
+// 按小写匹配；大小写完全一致的词条优先，其次是全小写词条（如 US → us）
+const DICT_SQL = "SELECT word, phonetic, translation, collins, oxford, tag, exchange FROM ecdict " +
+                 "WHERE sw = :sw ORDER BY (word = :w) DESC, (word = :sw) DESC LIMIT 1";
+
+// 当前词典连接。打开失败时清空 promise，下次查询会重试（例如词典文件稍后才生成）
+var dict = { path: "", promise: null };
+
+function openDict(path) {
+  if (!path) return Promise.resolve(null);
+  if (dict.path === path && dict.promise) return dict.promise;
+  const previous = dict.promise;
+  const promise = (async () => {
+    try { await (await previous)?.close(); } catch (_) {}
+    try {
+      const { Sqlite } = ChromeUtils.importESModule("resource://gre/modules/Sqlite.sys.mjs");
+      const conn = await Sqlite.openConnection({ path, readOnly: true });
+      const rows = await conn.execute("SELECT value FROM meta WHERE key = 'format'");
+      if (rows[0]?.getResultByName("value") === DICT_FORMAT) return conn;
+      await conn.close();
+    } catch (e) {
+      Zotero.debug(`[AI Translate] 词典打开失败: ${e}`);
+    }
+    if (dict.promise === promise) dict.promise = null;
+    return null;
+  })();
+  dict = { path, promise };
+  return promise;
+}
+
+function closeDict() {
+  const { promise } = dict;
+  dict = { path: "", promise: null };
+  promise?.then(conn => conn?.close()).catch(() => {});
+}
+
+async function findEntry(conn, word) {
+  const rows = await conn.executeCached(DICT_SQL, { w: word, sw: word.toLowerCase() });
+  if (!rows.length) return null;
+  const get = key => rows[0].getResultByName(key);
+  return {
+    word:        get("word"),
+    phonetic:    get("phonetic") || "",
+    translation: get("translation") || "",
+    collins:     get("collins") || 0,
+    oxford:      get("oxford") || 0,
+    tag:         get("tag") || "",
+    exchange:    get("exchange") || "",
+  };
+}
+
+// exchange 形如 "s:models/p:modelled/d:modelled/0:propose"：0 为原形，其余为词形变化。
+// 按 DICT_FORMS 的顺序排列；同一个词形对应多个类型时合并标签，如 "过去式/过去分词 modelled"
+function parseExchange(exchange) {
+  let lemma = "";
+  const byType = {};
+  for (const item of exchange.split("/")) {
+    const [type, value] = item.split(":");
+    if (!value) continue;
+    if (type === "0") lemma = value;
+    else if (DICT_FORMS.has(type)) byType[type] = value;
+  }
+  const forms = new Map();
+  for (const [type, name] of DICT_FORMS) {
+    const value = byType[type];
+    if (value) forms.set(value, [...(forms.get(value) || []), name]);
+  }
+  return { lemma, forms: [...forms].map(([value, names]) => ({ name: names.join("/"), value })) };
+}
+
+// 选中的是单词或短语且词典中有释义时返回 { entry, lemma }，否则返回 null（交给翻译模型）
+async function lookupDict(path, text) {
+  const word = text.replace(/[’‘]/g, "'").replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "").replace(/\s+/g, " ");
+  if (!LOOKUP_RE.test(word)) return null;
+  const conn = await openDict(path);
+  if (!conn) return null;
+  const entry = await findEntry(conn, word);
+  if (!entry) return null;
+  // 屈折形式（如 proposed）附上原形（propose）的释义
+  const lemmaWord = parseExchange(entry.exchange).lemma;
+  const lemma = lemmaWord && lemmaWord.toLowerCase() !== entry.word.toLowerCase()
+    ? await findEntry(conn, lemmaWord) : null;
+  if (!entry.translation && !lemma?.translation) return null;
+  return { entry, lemma };
 }
 
 // ── 截图翻译 ──────────────────────────────────────────────────────────────────
@@ -997,14 +1277,36 @@ function pingService(base) {
   });
 }
 
-// 更新地址胶囊上的状态圆点：绿 = 可用，红 = 无法连接
+// 更新胶囊上的状态圆点：绿 = 可用，红 = 无法连接 / 词典无效，灰 = 未设置词典
 async function refreshEndpoint(panel, key) {
   const ep = panel.els.endpoints?.[key];
   if (!ep) return;
   const base = panel.state[key];
-  const up = await pingService(base);
+  if (key === "dictPath" && !base) { ep.dot.className = "ait-endpoint-dot"; return; }
+  const up = key === "dictPath" ? !!(await openDict(base)) : await pingService(base);
   if (panel.state[key] !== base) return;   // 检测期间地址被改过，结果作废
   ep.dot.className = "ait-endpoint-dot " + (up ? "is-up" : "is-down");
+}
+
+// 用 Zotero 的文件选择框选择词典文件
+async function pickDict(panel) {
+  try {
+    const { FilePicker } = ChromeUtils.importESModule("chrome://zotero/content/modules/filePicker.mjs");
+    const fp = new FilePicker();
+    fp.init(panel.els.messages.ownerDocument.defaultView, "选择词典文件（tools/build_ecdict.py 生成的 .db）", fp.modeOpen);
+    fp.appendFilter("SQLite 词典", "*.db; *.sqlite");
+    fp.appendFilters(fp.filterAll);
+    if (await fp.show() !== fp.returnOK) return;
+    panel.state.dictPath = fp.file;
+    setPref("dictPath", fp.file);
+    panel.els.showDictName();
+    await refreshEndpoint(panel, "dictPath");
+    const ok = panel.els.endpoints.dictPath.dot.classList.contains("is-up");
+    setStatus(panel, ok ? "词典已加载" : "词典无效", false);
+  } catch (e) {
+    Zotero.debug(`[AI Translate] 选择词典失败: ${e}`);
+    setStatus(panel, "选择词典失败", false);
+  }
 }
 
 function xhrSSE(url, jsonBody, onChunk) {

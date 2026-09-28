@@ -143,6 +143,12 @@
   color: var(--ait-muted);
 }
 
+/* 自动模式下「合并」不起作用 */
+.ait-toggle.is-disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* ── 消息列表 ── */
 .ait-messages {
   flex: 1;
@@ -486,6 +492,27 @@
 
 .ait-endpoint-input::placeholder { color: #b5b1aa; }
 
+/* 词典胶囊：点击选择文件 */
+.ait-endpoint-btn {
+  appearance: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ait-endpoint-file {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ait-text);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.ait-endpoint-file.is-empty { color: #b5b1aa; }
+
 .ait-action-btn {
   display: inline-flex;
   align-items: center;
@@ -597,4 +624,78 @@
 .ait-mini-btn:hover {
   color: var(--ait-text);
   border-color: var(--ait-accent);
+}
+
+/* ── 词典卡片 ───────────────────────────────────────────── */
+
+.ait-dict-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-bottom: 6px;
+}
+
+.ait-dict-word {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--ait-text);
+}
+
+.ait-dict-word.is-lemma { font-size: 14px; }
+
+.ait-dict-phonetic {
+  font-size: 12px;
+  color: var(--ait-muted);
+}
+
+.ait-dict-badge {
+  padding: 0 6px;
+  border-radius: 8px;
+  background: #f3ede6;
+  color: #9a6b4f;
+  font-size: 10.5px;
+  line-height: 17px;
+}
+
+.ait-dict-sense {
+  display: flex;
+  gap: 6px;
+  margin: 3px 0;
+  line-height: 1.6;
+}
+
+.ait-dict-pos {
+  flex-shrink: 0;
+  min-width: 28px;
+  color: var(--ait-accent);
+  font-size: 12px;
+  font-style: italic;
+  font-weight: 600;
+}
+
+.ait-dict-forms {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--ait-muted);
+}
+
+.ait-dict-forms b {
+  font-weight: 600;
+  color: #555;
+}
+
+.ait-dict-lemma {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--ait-line);
+}
+
+.ait-dict-lemma-tag {
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--ait-accent);
+  color: #fff;
+  font-size: 10.5px;
+  line-height: 17px;
 }
