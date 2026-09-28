@@ -1,11 +1,15 @@
-# AI 论文阅读助手 Zotero 插件
+<p align="center"><img src="Inkbridge.png" alt="墨桥·InkBridge" width="280"></p>
 
-在 Zotero PDF 阅读器里把英文论文翻译成中文。选中文即可翻译；截图可以翻译带公式的段落，公式会保留为 LaTeX 并直接渲染。模型全部在本地运行，插件直接调用 vLLM 的 OpenAI 兼容接口，不需要额外的后端。
+# 墨桥·InkBridge
+
+在 Zotero PDF 阅读器里选中即可翻译；截图可以翻译带公式的段落，公式会保留为 LaTeX 并直接渲染。
+
+模型全部在本地运行，插件直接调用 vLLM 的 OpenAI 兼容接口，不需要额外的后端。
 
 ```text
                     ┌──▶ vLLM :8001  HY-MT1.5-1.8B     文本翻译
-Zotero 插件 ──SSE──┤
-                    └──▶ vLLM :8002  HunyuanOCR-1.5    截图识别 + 翻译
+Zotero 插件 ──HTTP──┼──▶ vLLM :8002  HunyuanOCR-1.5    截图识别 + 翻译
+                    └──▶ TTS  :8003  Kokoro-82M        单词发音（CPU）
 ```
 
 ## 功能
@@ -13,9 +17,11 @@ Zotero 插件 ──SSE──┤
 - **选中翻译**：在 PDF 中选中英文后自动翻译，流式输出。每次翻译都是独立请求，不携带历史，只输出译文。
 - **单词查词**：选中单个单词或短语（不超过 4 个词）时，从离线词典 ECDICT 中给出音标、考试标签和按词性分行的全部词义，以及词形变化；词典查不到时自动交给翻译模型。
 - **中译英**：输入或选中的文字以中文为主时自动译成英文。中文词（1–8 个汉字）从词典中反查，列出最多 8 个英文候选词及对应释义；中文句子交给翻译模型。
+- **发音与朗读**：词典卡片中每个英文单词旁有「英 🔊」「美 🔊」按钮；翻译结果卡片底部有「朗读 英 🔊 美 🔊」，逐句朗读卡片中的英文，再次点击可停止。
 - **手动翻译与跨页合并**：关闭 `自动` 开关后，选中的文字先放进输入框，按 F（或在输入框中按 Enter）再翻译。再打开 `合并` 开关，多次选中的文字会合并后一起翻译，适合跨页、跨栏的段落；行尾断词（如 `compu-` + `tation`）会自动拼回。
 - **截图翻译**：截图后在输入框按 Ctrl+V，或把图片拖进面板。先识别原文，再输出译文；公式保留为 LaTeX，并用 KaTeX 渲染。自动判断截图语言：英文截图译成中文，中文截图译成英文。
-- **服务状态**：顶部胶囊上的圆点显示翻译服务、OCR 服务和词典是否可用（绿色可用，红色无法连接或词典无效，灰色未设置词典），每 2 分钟检测一次，每次翻译结束后也会立即检测。
+- **设置页**：服务地址与词典文件在 Zotero「设置 → 墨桥·InkBridge」中配置，面板上不显示；「测试连接」可查看各服务和词典是否可用。请求失败时，面板状态栏会提示是哪个服务不可用。
+- **不留痕迹**：对话历史、截图、发音音频都只在内存中，关闭 Zotero 后不保留；插件的请求均不写入 Zotero 的磁盘缓存。
 
 ## 环境要求
 
@@ -59,11 +65,28 @@ hf download tencent/HunyuanOCR --exclude 'v1.0/*' --exclude 'dflash/*' --exclude
 python3 tools/build_ecdict.py <MODEL_DIR>/ecdict.db
 ```
 
-已下载 `ecdict.csv` 时可用 `--csv ecdict.csv` 跳过下载。生成后在插件顶部点击「词典」选择该文件。不设置词典时，选中单词也会交给翻译模型。
+已下载 `ecdict.csv` 时可用 `--csv ecdict.csv` 跳过下载。生成后在 Zotero「设置 → 墨桥·InkBridge → 离线词典」中选择该文件。不设置词典时，选中单词也会交给翻译模型。
 
-词典格式随插件更新：若「词典」圆点为红色且状态栏提示「词典需重新生成」，重新运行上面的命令即可（约 3 秒）。
+词典格式随插件更新：若设置页中「测试连接」显示「需重新生成」，重新运行上面的命令即可（约 3 秒）。
 
-### 4. 启动服务
+### 4. 发音与朗读（可选）
+
+发音服务是仓库中的 `tools/tts_server.py`，使用 [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) 在 CPU 上运行，建议放在独立环境中：
+
+```bash
+conda create -n tts python=3.12 -y
+conda activate tts
+pip install kokoro-onnx
+
+# 模型文件（int8 量化版约 92 MB + 音色 28 MB）
+mkdir -p <MODEL_DIR>/kokoro && cd <MODEL_DIR>/kokoro
+curl -LO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx
+curl -LO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+```
+
+音素转换依赖系统的 espeak-ng（Ubuntu 可用 `sudo apt install espeak-ng` 安装）。
+
+### 5. 启动服务
 
 两个服务依次启动（同时启动时两者的显存探测会互相干扰）：
 
@@ -100,24 +123,36 @@ VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve <MODEL_DIR>/HunyuanOCR-1.5 \
 
 启动后第一次翻译较长文本时，Triton 会现场编译内核，可能卡住几十秒，之后恢复正常。
 
+### 6. 启动服务（可选）
+
+发音服务（约 2 秒就绪，占用约 250 MB 内存）：
+
+```bash
+conda activate tts
+python3 tools/tts_server.py --model-dir <MODEL_DIR>/kokoro --port 8003
+```
+
+每个单词首次合成约 0.5–1 秒，之后命中缓存可立即播放。
+
 ## 安装插件
 
 在仓库根目录打包：
 
 ```bash
-rm -f ai-paper.xpi
-cd zotero-plugin && zip -r -X ../ai-paper.xpi . && cd ..
+rm -f inkbridge.xpi
+cd zotero-plugin && zip -r -X ../inkbridge.xpi . && cd ..
 ```
 
-在 Zotero 的「工具 → 插件」中，点齿轮菜单 →「从文件安装插件」，选择 `ai-paper.xpi`，然后重启 Zotero。
+在 Zotero 的「工具 → 插件」中，点齿轮菜单 →「从文件安装插件」，选择 `inkbridge.xpi`，然后重启 Zotero。
 
 ## 使用
 
-1. 打开一篇 PDF，在右侧条目面板中找到「AI 翻译」。
+1. 打开一篇 PDF，在右侧条目面板中找到「墨桥·InkBridge」。
 2. **选中翻译**：在 PDF 中选中英文。选中的是单词或短语时，会显示词典释义。中文内容会自动译成英文，也可以在输入框里直接输入中文。
 3. **手动翻译与跨页合并**：关闭顶部的 `自动` 开关，选中文字后按 F 翻译。需要合并时打开 `合并` 开关，依次选中上一页末尾和下一页开头的文字，状态栏会显示「已合并 N 段」，然后按 F 一起翻译。F 只在有待翻译文本、且没有在输入框或批注中打字时生效；`合并` 在自动模式下不起作用。
 4. **截图翻译**：用系统截图工具框选区域（GNOME 下按 PrtSc，截图会自动复制到剪贴板），点一下面板底部的输入框，按 Ctrl+V。中文截图会先识别出开头几个字，判断为中文后自动改为译成英文。
-5. 顶部两个服务地址可以直接修改，回车或点击别处后保存；清空则恢复默认。地址可以省略 `http://`。点击「词典」胶囊可选择词典文件。
+5. **发音与朗读**：点击词典卡片中单词旁的「英 🔊」「美 🔊」听单词发音；点击翻译结果卡片底部的「朗读 英 🔊 / 美 🔊」逐句朗读英文，播放中再次点击即停止。
+6. **设置**：在 Zotero「设置 → 墨桥·InkBridge」中修改服务地址（修改后立即生效，可省略 `http://`，清空则恢复默认）、选择词典文件，并可点击「测试连接」检查状态。
 
 ## 配置
 
@@ -134,7 +169,7 @@ cd zotero-plugin && zip -r -X ../ai-paper.xpi . && cd ..
 | `OCR_MAX_TOKENS`                            | 截图翻译输出上限（原文 + 译文）                           |
 | `OCR_MAX_SIDE`                              | 截图长边超过该像素时等比缩小                              |
 
-两个服务地址默认是 `http://127.0.0.1:8001` 和 `http://127.0.0.1:8002`，可在面板顶部修改。
+服务地址默认是 `http://127.0.0.1:8001`（翻译）、`http://127.0.0.1:8002`（OCR）和 `http://127.0.0.1:8003`（发音），在 Zotero「设置 → 墨桥·InkBridge」中修改。
 
 ## 本地开发
 
@@ -147,16 +182,20 @@ cd zotero-plugin && zip -r -X ../ai-paper.xpi . && cd ..
 ## 目录结构
 
 ```text
+Inkbridge.png                 Logo
 tools/
-└── build_ecdict.py           生成查词用的 ECDICT SQLite 词典
+├── build_ecdict.py           生成查词用的 ECDICT SQLite 词典
+└── tts_server.py             单词发音服务（Kokoro-82M）
 zotero-plugin/
-├── bootstrap.js              插件全部逻辑：面板 UI、选中/截图翻译、查词、流式请求、公式渲染
+├── bootstrap.js              插件全部逻辑：面板 UI、选中/截图翻译、查词、发音朗读、流式请求、公式渲染
+├── preferences.xhtml         Zotero「设置 → 墨桥·InkBridge」页面
+├── preferences.js            设置页脚本（测试连接、选择词典）
 ├── manifest.json
 ├── prefs.js                  默认配置（服务地址、词典路径等）
 ├── chrome/
 │   ├── content/lib/          KaTeX（公式渲染）
-│   ├── content/icons/
-│   └── skin/panel.css        面板样式
+│   ├── content/icons/        插件图标（由 Inkbridge.png 裁出的猫头鹰；16/20 为条目面板用的定尺寸图标）
+│   └── skin/                 panel.css 面板样式、prefs.css 设置页样式
 └── locale/
 ```
 
@@ -164,4 +203,5 @@ zotero-plugin/
 
 - [KaTeX](https://katex.org/)：MIT，见 `zotero-plugin/chrome/content/lib/KATEX_LICENSE`
 - [ECDICT](https://github.com/skywind3000/ECDICT)：MIT，词典数据不包含在本仓库中，由 `tools/build_ecdict.py` 下载生成
+- [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx)：MIT；[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) 模型权重：Apache-2.0，不包含在本仓库中
 - [HY-MT1.5](https://huggingface.co/tencent/HY-MT1.5-1.8B)、[HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR)：模型权重遵循腾讯混元各自的许可协议

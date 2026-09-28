@@ -1,0 +1,33 @@
+/* 「墨桥·InkBridge」设置页 */
+
+.ait-pref-hint {
+  color: var(--fill-secondary, #666);
+}
+
+.ait-pref-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(220px, 1fr) max-content;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.ait-pref-grid input[type="text"] {
+  min-width: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.ait-pref-file {
+  min-width: 0;
+}
+
+.ait-pref-file input[type="text"] {
+  flex: 1;
+}
+
+.ait-pref-status {
+  min-width: 90px;
+  color: var(--fill-secondary, #888);
+}
+
+.ait-pref-status.is-up   { color: #2da44e; }
+.ait-pref-status.is-down { color: #d1242f; }

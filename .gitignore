@@ -10,7 +10,6 @@
 *.xpi
 *.bak
 
-*.png
 
 # 编辑器 / Python 缓存
 .vscode/

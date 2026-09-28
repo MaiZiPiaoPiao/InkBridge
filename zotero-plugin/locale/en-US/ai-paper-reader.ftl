@@ -1,4 +1,4 @@
 ai-paper-reader-section-header =
-    .label = AI 翻译
+    .label = 墨桥·InkBridge
 ai-paper-reader-section-sidenav =
-    .tooltiptext = AI 翻译
+    .tooltiptext = 墨桥·InkBridge

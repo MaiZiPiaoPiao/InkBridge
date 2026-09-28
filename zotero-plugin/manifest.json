@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "name": "AI 论文阅读助手",
-  "version": "1.1.0",
-  "description": "Zotero PDF 阅读器内的英文→中文学术翻译，支持含公式的截图翻译（本地 vLLM + HY-MT1.5 + HunyuanOCR-1.5）。",
+  "name": "墨桥·InkBridge",
+  "version": "1.1.1",
+  "description": "Zotero PDF 阅读器内的中英学术互译：选词查词、含公式的截图翻译与朗读，模型全部在本地运行。",
   "author": "maipeng",
   "homepage_url": "https://github.com/maipeng/ai-paper-reader",
   "permissions": [
@@ -10,8 +10,8 @@
     "https://*/*"
   ],
   "icons": {
-    "48": "chrome/content/icons/bard.png",
-    "96": "chrome/content/icons/bard.png"
+    "48": "chrome/content/icons/inkbridge-48.png",
+    "96": "chrome/content/icons/inkbridge-96.png"
   },
   "applications": {
     "zotero": {

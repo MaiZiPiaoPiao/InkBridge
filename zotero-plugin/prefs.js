@@ -5,3 +5,4 @@ pref("extensions.ai-paper-reader.apiBase", "http://127.0.0.1:8001");
 pref("extensions.ai-paper-reader.ocrApiBase", "http://127.0.0.1:8002");
 pref("extensions.ai-paper-reader.mergeSelections", false);
 pref("extensions.ai-paper-reader.dictPath", "");
+pref("extensions.ai-paper-reader.ttsApiBase", "http://127.0.0.1:8003");

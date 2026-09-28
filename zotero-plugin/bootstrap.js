@@ -51,7 +51,46 @@ const OCR_MAX_SIDE   = 2048;   // 截图长边超过该像素时等比缩小，�
 const OCR_SRC_MARK   = "图中的文字是";
 const OCR_TRANS_MARKS = ["翻译成中文为", "翻译成英文为"];
 
-const PING_INTERVAL_MS = 2 * 60 * 1000;   // 顶部服务状态圆点的检测间隔
+
+// ── 单词发音（tools/tts_server.py，Kokoro-82M，CPU 运行）──
+const DEFAULT_TTS_API = "http://127.0.0.1:8003";
+const TTS_ACCENTS = [["uk", "英"], ["us", "美"]];   // 按钮顺序与标签
+const TTS_MAX_CHARS = 380;   // 朗读时每句的长度上限，与 tts_server.py 的 MAX_TEXT（400）配套
+
+// ── 设置（在 Zotero「设置 → 墨桥·InkBridge」中修改，面板不再显示）──
+const ENDPOINT_DEFAULTS = { apiBase: DEFAULT_API, ocrApiBase: DEFAULT_OCR_API, ttsApiBase: DEFAULT_TTS_API };
+const SETTING_KEYS = [...Object.keys(ENDPOINT_DEFAULTS), "dictPath"];
+var settingObservers = [];
+
+// 服务地址：去掉末尾 /，省略协议时补 http://；为空或是旧版 8000 端口时用默认值
+function endpointPref(key) {
+  const def = ENDPOINT_DEFAULTS[key];
+  const v = String(getPref(key, def) || "").trim().replace(/\/+$/, "");
+  if (!v || v === LEGACY_API) return def;
+  return /^https?:\/\//.test(v) ? v : "http://" + v;
+}
+
+function readSettings() {
+  return {
+    apiBase:    endpointPref("apiBase"),
+    ocrApiBase: endpointPref("ocrApiBase"),
+    ttsApiBase: endpointPref("ttsApiBase"),
+    dictPath:   String(getPref("dictPath", "") || ""),   // ECDICT 词典文件（build_ecdict.py 生成）
+  };
+}
+
+// 设置页修改后立即同步到所有已打开的面板
+function watchSettings() {
+  const apply = () => { for (const panel of panels.values()) Object.assign(panel.state, readSettings()); };
+  settingObservers = SETTING_KEYS.map(key => Zotero.Prefs.registerObserver(PREF_KEY + key, apply, true));
+}
+
+function unwatchSettings() {
+  for (const symbol of settingObservers) {
+    try { Zotero.Prefs.unregisterObserver(symbol); } catch (_) {}
+  }
+  settingObservers = [];
+}
 
 var chromeHandle = null;
 var styleSheetSvc = null;
@@ -118,11 +157,11 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
     pluginID: ADDON_ID,
     header: {
       l10nID: "ai-paper-reader-section-header",
-      icon:   `chrome://${ADDON_REF}/content/icons/sparkle.svg`,
+      icon:   `chrome://${ADDON_REF}/content/icons/inkbridge-16.svg`,
     },
     sidenav: {
       l10nID: "ai-paper-reader-section-sidenav",
-      icon:   `chrome://${ADDON_REF}/content/icons/sparkle.svg`,
+      icon:   `chrome://${ADDON_REF}/content/icons/inkbridge-20.svg`,
     },
     onInit({ body, doc }) {
       body.style.cssText = "display:flex;flex-direction:column;overflow:hidden;padding:0;";
@@ -194,6 +233,21 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
 
   // 7. 已打开的主窗口挂上 F 快捷键（之后打开的窗口在 onMainWindowLoad 中挂）
   for (const win of Zotero.getMainWindows?.() || []) attachKeyHandler(win);
+
+  // 8. 清除旧版本留在磁盘缓存中的服务响应（新请求都已禁止缓存）
+  purgeCachedResponses();
+
+  // 9. 设置页：服务地址与词典在 Zotero「设置 → 墨桥·InkBridge」中配置（插件卸载时 Zotero 自动注销）
+  Zotero.AIPaperReader = { checkServices, pickDictFile };
+  watchSettings();
+  Zotero.PreferencePanes.register({
+    pluginID:    ADDON_ID,
+    src:         rootURI + "preferences.xhtml",
+    scripts:     [rootURI + "preferences.js"],
+    stylesheets: [rootURI + "chrome/skin/prefs.css"],
+    label:       "墨桥·InkBridge",
+    image:       `chrome://${ADDON_REF}/content/icons/inkbridge-64.png`,
+  });
 }
 
 async function onMainWindowLoad({ window }) {
@@ -228,6 +282,8 @@ function shutdown({ id, version, resourceURI, rootURI }, reason) {
   } catch (_) {}
 
   detachKeyHandlers();
+  unwatchSettings();
+  delete Zotero.AIPaperReader;
   for (const panel of panels.values()) disposePanel(panel);
   panels.clear();
   closeDict();
@@ -267,7 +323,7 @@ function onReaderSelection(event) {
       "margin-top:5px;padding:3px 8px;border-radius:4px;" +
       "background:#f0f7ff;color:#2b6fd6;font-size:11px;";
     note.textContent = getPref("autoTranslate", true) !== false
-      ? "已发送至 AI 翻译"
+      ? "已发送至墨桥·InkBridge"
       : getPref("mergeSelections", false) === true
         ? `已加入待翻译（第 ${merged} 段）· 按 F 翻译`
         : "已放入输入框 · 按 F 翻译";
@@ -567,12 +623,7 @@ function buildUI(body, doc) {
     pending:       false,
     autoTranslate: getPref("autoTranslate", true) !== false,
     mergeSelections: getPref("mergeSelections", false) === true,   // 非自动模式下多次选中是否合并
-    apiBase:       (() => {
-      const v = (getPref("apiBase", DEFAULT_API) || DEFAULT_API).replace(/\/+$/, "");
-      return v === LEGACY_API ? DEFAULT_API : v;
-    })(),
-    ocrApiBase:    (getPref("ocrApiBase", DEFAULT_OCR_API) || DEFAULT_OCR_API).replace(/\/+$/, ""),
-    dictPath:      getPref("dictPath", "") || "",   // ECDICT 词典文件（build_ecdict.py 生成）
+    ...readSettings(),   // apiBase / ocrApiBase / ttsApiBase / dictPath
     segments:      0,    // 非自动模式下输入框中已合并的选中段数
     lastSegment:   "",   // 上一次合并的选中文本，用于忽略重复事件
   };
@@ -607,60 +658,18 @@ function buildUI(body, doc) {
   const mergeToggle = toggle("mergeSelections", "合并");
   syncMerge();
 
-  // 服务地址胶囊：● 名称 地址。显示时省略 http://；回车或失焦后保存，清空恢复默认
-  els.endpoints = {};
-  const endpoint = (key, label, def) => {
-    const dot = h(doc, "span", { className: "ait-endpoint-dot" });
-    const input = h(doc, "input", {
-      className:   "ait-endpoint-input",
-      type:        "text",
-      value:       hostOf(state[key]),
-      placeholder: hostOf(def),
-      spellcheck:  "false",
-    });
-    input.addEventListener("change", () => {
-      const v = input.value.trim().replace(/\/+$/, "");
-      state[key] = v ? (/^https?:\/\//.test(v) ? v : "http://" + v) : def;
-      input.value = hostOf(state[key]);
-      setPref(key, state[key]);
-      refreshEndpoint({ state, els }, key);
-    });
-    input.addEventListener("keydown", e => { if (e.key === "Enter") input.blur(); });
-    els.endpoints[key] = { dot };
-    return h(doc, "label", { className: "ait-endpoint" }, [
-      dot,
-      h(doc, "span", { className: "ait-endpoint-label", text: label }),
-      input,
-    ]);
-  };
-  const transChip = endpoint("apiBase", "翻译", DEFAULT_API);
-  const ocrChip   = endpoint("ocrApiBase", "OCR", DEFAULT_OCR_API);
-
-  // 词典胶囊：● 词典 文件名，点击选择 build_ecdict.py 生成的 .db 文件
-  const dictDot  = h(doc, "span", { className: "ait-endpoint-dot" });
-  const dictName = h(doc, "span", { className: "ait-endpoint-file" });
-  els.showDictName = () => {
-    dictName.textContent = state.dictPath ? state.dictPath.split(/[\\/]/).pop() : "点击选择";
-    dictName.classList.toggle("is-empty", !state.dictPath);
-  };
-  els.showDictName();
-  els.endpoints.dictPath = { dot: dictDot };
-  const dictChip = h(doc, "button", {
-    className: "ait-endpoint ait-endpoint-btn", type: "button",
-    onclick: () => pickDict({ state, els }),
-  }, [dictDot, h(doc, "span", { className: "ait-endpoint-label", text: "词典" }), dictName]);
 
   const clearBtn = h(doc, "button", {
     className: "ait-action-btn ait-action-ghost", type: "button", text: "清空",
     onclick: () => panelClear({ state, els }),
   });
 
-  // ── 顶栏：标题行 + 服务地址行 ──
+  // ── 顶栏：标题 + 状态 + 开关（服务地址在 Zotero 设置中配置）──
   const topbar = h(doc, "div", { className: "ait-topbar" }, [
     h(doc, "div", { className: "ait-topbar-row" }, [
       h(doc, "div", { className: "ait-topbar-left" }, [
         els.statusDot,
-        h(doc, "span", { className: "ait-title", text: "AI 翻译" }),
+        h(doc, "span", { className: "ait-title", text: "墨桥·InkBridge" }),
       ]),
       h(doc, "div", { className: "ait-topbar-right" }, [
         els.statusText,
@@ -669,7 +678,6 @@ function buildUI(body, doc) {
         clearBtn,
       ]),
     ]),
-    h(doc, "div", { className: "ait-endpoints" }, [transChip, ocrChip, dictChip]),
   ]);
 
   // ── 消息区（空状态 + 动态卡片）──
@@ -744,16 +752,6 @@ function buildUI(body, doc) {
     els.messagesRO.observe(els.messages);
   }
 
-  // 每 2 分钟检测两个服务是否可用，更新地址胶囊上的圆点（每次翻译结束后也会立即检测）
-  const refreshAll = () => {
-    if (!els.messages.isConnected) return;
-    refreshEndpoint({ state, els }, "apiBase");
-    refreshEndpoint({ state, els }, "ocrApiBase");
-    refreshEndpoint({ state, els }, "dictPath");
-  };
-  refreshAll();
-  els.win = win;
-  els.pingTimer = win?.setInterval(refreshAll, PING_INTERVAL_MS);
 }
 
 // ── 消息卡片 ──────────────────────────────────────────────────────────────────
@@ -802,16 +800,126 @@ function appendUserMsg(panel, text) {
 }
 
 // 结果卡底部的「复制原文 / 复制译文」，读取 view.source / view.translation；完成后再显示
-function copyActions(doc, view) {
+// 传入 panel 时左侧加「朗读 英 🔊 美 🔊」，朗读卡片中的英文（英译中读原文，中译英读译文）
+function copyActions(doc, view, panel) {
   const copySrc = h(doc, "button", { className: "ait-mini-btn", type: "button", text: "复制原文",
     onclick: () => copyText(doc, view.source, copySrc) });
   const copyTrans = h(doc, "button", { className: "ait-mini-btn", type: "button", text: "复制译文",
     onclick: () => copyText(doc, view.translation, copyTrans) });
-  return h(doc, "div", { className: "ait-card-actions", hidden: "" }, [copySrc, copyTrans]);
+  if (panel) {
+    view.readGroup = h(doc, "span", { className: "ait-read" }, [
+      h(doc, "span", { className: "ait-read-label", text: "朗读" }),
+      speakButtons(doc, () => englishText(view), (text, accent, btn) =>
+        playTTS(panel, splitSentences(text), accent, btn)),
+    ]);
+  }
+  return h(doc, "div", { className: "ait-card-actions", hidden: "" }, [view.readGroup, copySrc, copyTrans]);
+}
+
+// 翻译完成后显示按钮行；卡片中没有英文时隐藏朗读
+function showActions(view) {
+  view.actions.hidden = false;
+  if (view.readGroup) view.readGroup.hidden = !englishText(view);
+}
+
+// 卡片中可朗读的英文：原文或译文中不以汉字为主、且含英文单词的那一个
+function englishText(view) {
+  return [view.source, view.translation].find(t => t && !isChinese(t) && /[A-Za-z]{2}/.test(t)) || "";
+}
+
+// 朗读前去掉 LaTeX 公式与 Markdown 符号，按句切分；超长的句子在逗号 / 分号 / 空格处再切
+function splitSentences(text) {
+  const plain = text.replace(MATH_RE, " ").replace(/[*`#>|]/g, " ").replace(/\s+/g, " ").trim();
+  const out = [];
+  for (const sentence of plain.split(/(?<=[.!?])\s+(?=[A-Z0-9"“(])/)) {
+    let rest = sentence.trim();
+    while (rest.length > TTS_MAX_CHARS) {
+      const cut = Math.max(rest.lastIndexOf(", ", TTS_MAX_CHARS), rest.lastIndexOf("; ", TTS_MAX_CHARS),
+                           rest.lastIndexOf(" ", TTS_MAX_CHARS));
+      const at = cut > 0 ? cut + 1 : TTS_MAX_CHARS;
+      out.push(rest.slice(0, at).trim());
+      rest = rest.slice(at).trim();
+    }
+    if (/[A-Za-z]/.test(rest)) out.push(rest);
+  }
+  return out;
+}
+
+// 「英 🔊」「美 🔊」发音按钮
+function speakButtons(doc, text, speak) {
+  return h(doc, "span", { className: "ait-speak" }, TTS_ACCENTS.map(([accent, label]) => {
+    const btn = h(doc, "button", { className: "ait-speak-btn", type: "button", text: label + " 🔊" });
+    btn.addEventListener("click", () => speak(typeof text === "function" ? text() : text, accent, btn));
+    return btn;
+  }));
+}
+
+// 依次合成并播放 segments（单词发音时只有一段）；播放当前句时预取下一句。
+// 同一面板只保留最后一次点击：再次点击正在播放的按钮 = 停止
+function playTTS(panel, segments, accent, btn) {
+  if (panel.state.audioBtn === btn) { stopAudio(panel); return; }
+  stopAudio(panel);
+  if (!segments.length) return;
+  const win = panel.els.messages.ownerDocument.defaultView;
+  const seq = panel.state.ttsSeq = (panel.state.ttsSeq || 0) + 1;
+  panel.state.audioBtn = btn;
+  btn.classList.add("is-playing");
+  const alive = () => seq === panel.state.ttsSeq && panel.state.audioBtn === btn;
+
+  const fetchSegment = text => new Promise((resolve, reject) => {
+    const xhr = newXHR();
+    openRequest(xhr, "GET", `${panel.state.ttsApiBase}/tts?text=${encodeURIComponent(text)}&accent=${accent}`);
+    xhr.responseType = "blob";
+    xhr.timeout = 30000;
+    xhr.onload = () => (xhr.status === 200 ? resolve(xhr.response) : reject(new Error("tts")));
+    xhr.onerror = xhr.ontimeout = () => reject(new Error("tts"));
+    xhr.send();
+  });
+
+  (async () => {
+    try {
+      let next = fetchSegment(segments[0]);
+      for (let i = 0; i < segments.length; i++) {
+        const blob = await next;
+        if (!alive()) return;
+        next = i + 1 < segments.length ? fetchSegment(segments[i + 1]) : null;
+        next?.catch(() => {});   // 失败留到下一轮 await 时处理
+        await playBlob(panel, win, blob);
+        if (!alive()) return;
+      }
+      stopAudio(panel);
+    } catch (e) {
+      if (!alive()) return;
+      stopAudio(panel);
+      setStatus(panel, e.message === "play" ? "无法播放音频" : "发音服务不可用（hymt tts）", false);
+    }
+  })();
+}
+
+// 播放一段音频，播完或被 stopAudio 暂停时结束
+function playBlob(panel, win, blob) {
+  return new Promise((resolve, reject) => {
+    const src = win.URL.createObjectURL(blob);
+    const audio = new win.Audio(src);
+    const finish = () => { win.URL.revokeObjectURL(src); resolve(); };
+    audio.addEventListener("ended", finish);
+    audio.addEventListener("pause", finish);
+    panel.state.audio = audio;
+    audio.play().catch(() => { win.URL.revokeObjectURL(src); reject(new Error("play")); });
+  });
+}
+
+// 停止当前播放并取消按钮高亮
+function stopAudio(panel) {
+  const { audio, audioBtn } = panel.state;
+  panel.state.audio = null;
+  panel.state.audioBtn = null;
+  audioBtn?.classList.remove("is-playing");
+  try { audio?.pause(); } catch (_) {}
 }
 
 // 词典卡片的一个词条：单词 + 音标 + 标签，按词性分行的全部释义，词形变化
-function dictEntryNodes(doc, entry, isLemma) {
+function dictEntryNodes(doc, entry, isLemma, speak) {
   const nodes = [];
   const badges = entry.tag.split(/\s+/).filter(t => DICT_TAGS[t]).map(t => DICT_TAGS[t]);
   if (entry.collins) badges.push("★".repeat(entry.collins));
@@ -820,6 +928,7 @@ function dictEntryNodes(doc, entry, isLemma) {
     isLemma ? h(doc, "span", { className: "ait-dict-lemma-tag", text: "原形" }) : null,
     h(doc, "span", { className: isLemma ? "ait-dict-word is-lemma" : "ait-dict-word", text: entry.word }),
     entry.phonetic ? h(doc, "span", { className: "ait-dict-phonetic", text: `/${entry.phonetic}/` }) : null,
+    speakButtons(doc, entry.word, speak),
     ...badges.map(b => h(doc, "span", { className: "ait-dict-badge", text: b })),
   ]));
   // 每行一个义项，行首的 "n." "vt." "[计]" 等作为词性/领域标签
@@ -840,12 +949,13 @@ function dictEntryNodes(doc, entry, isLemma) {
 // 查词结果卡：词条 + 原形词条（如有）+ 复制按钮
 function appendDictMsg(panel, { entry, lemma }) {
   const doc = panel.els.messages.ownerDocument;
+  const speak = (text, accent, btn) => playTTS(panel, [text], accent, btn);
   const text = [entry, lemma].filter(e => e?.translation)
     .map(e => (e === lemma ? `原形 ${e.word}\n` : "") + e.translation).join("\n\n");
   const view = { source: entry.word, translation: text };
   const content = h(doc, "div", { className: "ait-msg-content ait-dict" }, [
-    ...(entry.translation || entry.phonetic ? dictEntryNodes(doc, entry, false) : []),
-    ...(lemma?.translation ? [h(doc, "div", { className: "ait-dict-lemma" }, dictEntryNodes(doc, lemma, true))] : []),
+    ...(entry.translation || entry.phonetic ? dictEntryNodes(doc, entry, false, speak) : []),
+    ...(lemma?.translation ? [h(doc, "div", { className: "ait-dict-lemma" }, dictEntryNodes(doc, lemma, true, speak))] : []),
   ]);
   const actions = copyActions(doc, view);
   actions.hidden = false;
@@ -873,6 +983,7 @@ function appendZhDictMsg(panel, { term, candidates }) {
       h(doc, "div", { className: "ait-dict-head" }, [
         h(doc, "span", { className: "ait-zh-word", text: c.word }),
         c.phonetic ? h(doc, "span", { className: "ait-dict-phonetic", text: `/${c.phonetic}/` }) : null,
+        speakButtons(doc, c.word, (text, accent, btn) => playTTS(panel, [text], accent, btn)),
         ...badges.map(b => h(doc, "span", { className: "ait-dict-badge", text: b })),
       ]),
       h(doc, "div", { className: "ait-zh-sense" }, line.split(term).flatMap((part, i) =>
@@ -901,7 +1012,7 @@ function appendAiMsg(panel, source, label = "译文") {
   const cursor = doc.createElementNS(HTML_NS, "span");
   cursor.className = "ait-cursor";
   view.content.appendChild(cursor);
-  view.actions = copyActions(doc, view);
+  view.actions = copyActions(doc, view, panel);
   const card = h(doc, "div", { className: "ait-msg ait-msg-ai" }, [
     h(doc, "div", { className: "ait-msg-header" }, [
       h(doc, "span", { className: "ait-avatar", text: "AI" }),
@@ -927,7 +1038,7 @@ function setStatus(panel, text, busy) {
 function disposePanel(panel) {
   if (!panel) return;
   try { panel.els.messagesRO?.disconnect(); } catch (_) {}
-  try { panel.els.win?.clearInterval(panel.els.pingTimer); } catch (_) {}
+  stopAudio(panel);
 }
 
 function panelClear(panel) {
@@ -1009,7 +1120,7 @@ async function sendMessage(panel, userText) {
     view.content.replaceChildren(renderToDOM(aiText, doc));
     view.content.className = "ait-msg-content";
     view.translation = aiText;
-    view.actions.hidden = false;
+    showActions(view);
 
     setStatus(panel, finishReason === "length" ? "完成（已达长度上限）" : "完成", false);
   } catch (err) {
@@ -1019,7 +1130,6 @@ async function sendMessage(panel, userText) {
     setStatus(panel, "失败", false);
   }
 
-  refreshEndpoint(panel, "apiBase");
   panel.state.pending = false;
 }
 
@@ -1236,7 +1346,7 @@ function appendOcrMsg(panel) {
   ]);
   view.trans = h(doc, "div", { className: "ait-ocr-trans" });
   view.content = h(doc, "div", { className: "ait-msg-content ait-streaming" }, [view.details, view.trans]);
-  view.actions = copyActions(doc, view);
+  view.actions = copyActions(doc, view, panel);
   const card = h(doc, "div", { className: "ait-msg ait-msg-ai" }, [
     h(doc, "div", { className: "ait-msg-header" }, [
       h(doc, "span", { className: "ait-avatar", text: "AI" }),
@@ -1325,7 +1435,7 @@ async function sendImage(panel, file) {
     const parts = splitOcrOutput(raw);
     renderOcr(view, doc, parts, false);
     view.content.className = "ait-msg-content";
-    view.actions.hidden = false;
+    showActions(view);
     if (!parts.hasTranslation) view.details.open = true;   // 没有译文时展开原文
 
     setStatus(panel,
@@ -1341,7 +1451,6 @@ async function sendImage(panel, file) {
     setStatus(panel, "失败", false);
   }
 
-  refreshEndpoint(panel, "ocrApiBase");
   panel.state.pending = false;
 }
 
@@ -1359,16 +1468,47 @@ function newXHR() {
   return xhr;
 }
 
-// 地址显示时省略 http://（https:// 保留）
-function hostOf(url) {
-  return url.replace(/^http:\/\//, "");
+// 打开请求并禁止写入 Zotero 的 HTTP 缓存：发音音频、服务响应都不应落盘
+function openRequest(xhr, method, url) {
+  xhr.open(method, url, true);
+  try {
+    const { nsIRequest } = Components.interfaces;
+    xhr.channel.loadFlags |= nsIRequest.INHIBIT_CACHING | nsIRequest.LOAD_BYPASS_CACHE;
+  } catch (_) {}
 }
 
-// 服务是否可用：GET /v1/models，3 秒超时
-function pingService(base) {
+// 删除旧版本留在 Zotero 磁盘缓存中的本插件服务响应（如发音音频）
+function purgeCachedResponses() {
+  try {
+    const origins = ["apiBase", "ocrApiBase", "ttsApiBase"]
+      .map(key => getPref(key, "") || "")
+      .concat([DEFAULT_API, DEFAULT_OCR_API, DEFAULT_TTS_API])
+      .filter(Boolean)
+      .map(url => url.replace(/\/+$/, "") + "/");
+    const storage = Services.cache2.diskCacheStorage(Services.loadContextInfo.default);
+    const doomed = [];
+    storage.asyncVisitStorage({
+      QueryInterface: ChromeUtils.generateQI(["nsICacheStorageVisitor"]),
+      onCacheStorageInfo() {},
+      onCacheEntryInfo(uri, idEnhance) {
+        if (origins.some(o => uri.asciiSpec.startsWith(o))) doomed.push([uri, idEnhance]);
+      },
+      onCacheEntryVisitCompleted() {
+        for (const [uri, idEnhance] of doomed) storage.asyncDoomURI(uri, idEnhance, null);
+        if (doomed.length) Zotero.debug(`[AI Translate] 已清除 ${doomed.length} 条缓存的服务响应`);
+      },
+    }, true);
+  } catch (e) {
+    Zotero.debug(`[AI Translate] 清理缓存失败: ${e}`);
+  }
+}
+
+
+// 服务是否可用：vLLM 查 /v1/models，发音服务查 /health，3 秒超时
+function pingService(base, path = "/v1/models") {
   return new Promise(resolve => {
     const xhr = newXHR();
-    xhr.open("GET", base + "/v1/models", true);
+    openRequest(xhr, "GET", base + path);
     xhr.timeout = 3000;
     xhr.onload    = () => resolve(xhr.status === 200);
     xhr.onerror   = () => resolve(false);
@@ -1377,42 +1517,37 @@ function pingService(base) {
   });
 }
 
-// 更新胶囊上的状态圆点：绿 = 可用，红 = 无法连接 / 词典无效，灰 = 未设置词典
-async function refreshEndpoint(panel, key) {
-  const ep = panel.els.endpoints?.[key];
-  if (!ep) return;
-  const base = panel.state[key];
-  if (key === "dictPath" && !base) { ep.dot.className = "ait-endpoint-dot"; return; }
-  const up = key === "dictPath" ? !!(await openDict(base)) : await pingService(base);
-  if (panel.state[key] !== base) return;   // 检测期间地址被改过，结果作废
-  ep.dot.className = "ait-endpoint-dot " + (up ? "is-up" : "is-down");
+// ── 设置页接口（preferences.js 通过 Zotero.AIPaperReader 调用）───────────────
+
+// 检测三个服务与词典：{ apiBase, ocrApiBase, ttsApiBase: bool, dictPath: "ok" | "old" | "invalid" | "unset" }
+async function checkServices() {
+  const { apiBase, ocrApiBase, ttsApiBase, dictPath } = readSettings();
+  const [mt, ocr, tts, conn] = await Promise.all([
+    pingService(apiBase),
+    pingService(ocrApiBase),
+    pingService(ttsApiBase, "/health"),
+    dictPath ? openDict(dictPath) : null,
+  ]);
+  const dictState = !dictPath ? "unset" : conn ? "ok" : dict.oldFormat ? "old" : "invalid";
+  return { apiBase: mt, ocrApiBase: ocr, ttsApiBase: tts, dictPath: dictState };
 }
 
-// 用 Zotero 的文件选择框选择词典文件
-async function pickDict(panel) {
-  try {
-    const { FilePicker } = ChromeUtils.importESModule("chrome://zotero/content/modules/filePicker.mjs");
-    const fp = new FilePicker();
-    fp.init(panel.els.messages.ownerDocument.defaultView, "选择词典文件（tools/build_ecdict.py 生成的 .db）", fp.modeOpen);
-    fp.appendFilter("SQLite 词典", "*.db; *.sqlite");
-    fp.appendFilters(fp.filterAll);
-    if (await fp.show() !== fp.returnOK) return;
-    panel.state.dictPath = fp.file;
-    setPref("dictPath", fp.file);
-    panel.els.showDictName();
-    await refreshEndpoint(panel, "dictPath");
-    const ok = panel.els.endpoints.dictPath.dot.classList.contains("is-up");
-    setStatus(panel, ok ? "词典已加载" : dict.oldFormat ? "词典需重新生成" : "词典无效", false);
-  } catch (e) {
-    Zotero.debug(`[AI Translate] 选择词典失败: ${e}`);
-    setStatus(panel, "选择词典失败", false);
-  }
+// 用 Zotero 的文件选择框选择词典文件，保存到偏好（面板经偏好观察者自动更新）
+async function pickDictFile(win) {
+  const { FilePicker } = ChromeUtils.importESModule("chrome://zotero/content/modules/filePicker.mjs");
+  const fp = new FilePicker();
+  fp.init(win, "选择词典文件（tools/build_ecdict.py 生成的 .db）", fp.modeOpen);
+  fp.appendFilter("SQLite 词典", "*.db; *.sqlite");
+  fp.appendFilters(fp.filterAll);
+  if (await fp.show() !== fp.returnOK) return null;
+  setPref("dictPath", fp.file);
+  return fp.file;
 }
 
 function xhrSSE(url, jsonBody, onChunk) {
   return new Promise((resolve, reject) => {
     const xhr = newXHR();
-    xhr.open("POST", url, true);
+    openRequest(xhr, "POST", url);
     xhr.setRequestHeader("Content-Type", "application/json");
     // 不用 XHR 的"总时长"超时：流式回答越长总耗时越久，会被误判超时。
     // 改用"空闲超时"——只要后端还在持续吐字就不算超时。

@@ -1,0 +1,46 @@
+<vbox id="ait-prefpane" onload="AITPrefs.init()">
+	<groupbox>
+		<vbox>
+			<label><html:h2>服务地址</html:h2></label>
+		</vbox>
+		<label class="ait-pref-hint">本地 vLLM 与发音服务的地址，修改后立即生效，可以省略 http://。</label>
+		<separator class="thin"/>
+		<html:div class="ait-pref-grid">
+			<label value="文本翻译（HY-MT）" control="ait-pref-apiBase"/>
+			<html:input id="ait-pref-apiBase" type="text" spellcheck="false"
+				preference="extensions.ai-paper-reader.apiBase" placeholder="http://127.0.0.1:8001"/>
+			<html:span id="ait-status-apiBase" class="ait-pref-status"/>
+
+			<label value="截图识别（HunyuanOCR）" control="ait-pref-ocrApiBase"/>
+			<html:input id="ait-pref-ocrApiBase" type="text" spellcheck="false"
+				preference="extensions.ai-paper-reader.ocrApiBase" placeholder="http://127.0.0.1:8002"/>
+			<html:span id="ait-status-ocrApiBase" class="ait-pref-status"/>
+
+			<label value="单词发音（Kokoro）" control="ait-pref-ttsApiBase"/>
+			<html:input id="ait-pref-ttsApiBase" type="text" spellcheck="false"
+				preference="extensions.ai-paper-reader.ttsApiBase" placeholder="http://127.0.0.1:8003"/>
+			<html:span id="ait-status-ttsApiBase" class="ait-pref-status"/>
+		</html:div>
+	</groupbox>
+
+	<groupbox>
+		<vbox>
+			<label><html:h2>离线词典</html:h2></label>
+		</vbox>
+		<label class="ait-pref-hint">由 tools/build_ecdict.py 生成的 ecdict.db，用于单词查词和中文词反查。</label>
+		<separator class="thin"/>
+		<html:div class="ait-pref-grid">
+			<label value="词典文件" control="ait-pref-dictPath"/>
+			<hbox align="center" class="ait-pref-file">
+				<html:input id="ait-pref-dictPath" type="text" readonly="readonly"
+					preference="extensions.ai-paper-reader.dictPath" placeholder="未选择"/>
+				<button id="ait-pref-dict-pick" label="选择…"/>
+			</hbox>
+			<html:span id="ait-status-dictPath" class="ait-pref-status"/>
+		</html:div>
+	</groupbox>
+
+	<hbox>
+		<button id="ait-pref-test" label="测试连接"/>
+	</hbox>
+</vbox>
