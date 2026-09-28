@@ -50,11 +50,6 @@
   padding: 6px 12px;
 }
 
-/* 第二行：API 输入 + 按钮 */
-.ait-ctrl-row {
-  gap: 6px;
-}
-
 .ait-topbar-left {
   display: flex;
   align-items: center;
@@ -158,6 +153,14 @@
   flex-direction: column;
   gap: 10px;
   scroll-behavior: smooth;
+}
+
+/* 一轮翻译：原文卡 + 结果卡；最新一轮的 min-height 由 JS 设为可视高度 */
+.ait-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
 /* 空状态 */
@@ -418,36 +421,70 @@
   font-size: 12px;
 }
 
-.ait-api-row {
+/* 服务地址行：两个并排的胶囊  ● 名称 地址 */
+.ait-endpoints {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;   /* 面板较窄时两个胶囊上下排列，保证地址完整显示 */
   gap: 6px;
+  padding: 0 12px 8px;
 }
 
-.ait-api-label {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
+.ait-endpoint {
+  flex: 1 1 150px;
+  min-width: 150px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--ait-line);
+  border-radius: 12px;
+  background: var(--ait-bg);
+  cursor: text;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.ait-endpoint:hover { border-color: #d6d2cb; }
+
+.ait-endpoint:focus-within {
+  border-color: var(--ait-accent);
+  background: var(--ait-surface);
+}
+
+.ait-endpoint-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #c9c6c0;   /* 检测中 */
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+
+.ait-endpoint-dot.is-up   { background: #3fb950; }
+.ait-endpoint-dot.is-down { background: #e5534b; }
+
+.ait-endpoint-label {
+  font-size: 10.5px;
+  font-weight: 600;
   color: var(--ait-muted);
   flex-shrink: 0;
 }
 
-.ait-api-input {
+.ait-endpoint-input {
   flex: 1;
   min-width: 0;
-  height: 24px;
-  padding: 2px 7px;
-  border: 1px solid var(--ait-line);
-  border-radius: 6px;
-  background: var(--ait-bg);
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--ait-text);
-  font: inherit;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 11px;
   outline: none;
-  transition: border-color 0.15s;
+  text-overflow: ellipsis;
 }
 
-.ait-api-input:focus { border-color: var(--ait-accent); }
+.ait-endpoint-input::placeholder { color: #b5b1aa; }
 
 .ait-action-btn {
   display: inline-flex;
@@ -477,4 +514,87 @@
   background: #f0ede8;
   color: var(--ait-text);
   opacity: 1;
+}
+
+/* ── 截图翻译 ───────────────────────────────────────────── */
+
+.ait-msg-user .ait-msg-image-wrap {
+  padding: 6px;
+  white-space: normal;
+}
+
+.ait-msg-image {
+  display: block;
+  max-width: 100%;
+  max-height: 180px;
+  margin: 0 auto;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+.ait-ocr-source {
+  margin: 0 0 10px;
+  padding: 0 0 8px;
+  border-bottom: 1px dashed var(--ait-line);
+  font-size: 12.5px;
+  color: #555;
+}
+
+.ait-ocr-source > summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ait-muted);
+  user-select: none;
+}
+
+.ait-ocr-source-body {
+  margin-top: 6px;
+}
+
+.ait-ocr-source[hidden] { display: none; }
+
+/* 公式：KaTeX 输出的 MathML */
+.ait-math math {
+  font-size: 1.05em;
+}
+
+.ait-math-display {
+  display: block;
+  margin: 6px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+}
+
+.ait-math-raw {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #a0522d;
+}
+
+.ait-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 0 2px;
+}
+
+.ait-card-actions[hidden] { display: none; }
+
+.ait-mini-btn {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--ait-line);
+  border-radius: 5px;
+  background: var(--ait-surface);
+  color: var(--ait-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ait-mini-btn:hover {
+  color: var(--ait-text);
+  border-color: var(--ait-accent);
 }

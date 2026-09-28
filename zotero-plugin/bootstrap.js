@@ -25,9 +25,23 @@ function outputTokenLimit(text) {
   return Math.max(MIN_OUTPUT_TOKENS, Math.min(MAX_OUTPUT_TOKENS, estimate));
 }
 
+// ── 截图翻译（HunyuanOCR-1.5，由 vllm serve --served-model-name hy-ocr 提供）──
+const DEFAULT_OCR_API = "http://127.0.0.1:8002";
+const OCR_MODEL_NAME  = "hy-ocr";
+// 官方 trans_other2zh 任务提示词：先按阅读顺序提取原文（公式为 LaTeX），再输出中文译文
+const OCR_PROMPT = "按照阅读顺序，提取图中文字，公式用latex格式表示，表格用markdown格式表示，再将文字内容翻译为中文。";
+// 官方客户端采样参数（贪心解码）
+const OCR_SAMPLING = { temperature: 0, top_p: 1.0, top_k: -1, repetition_penalty: 1.08, skip_special_tokens: true };
+const OCR_MAX_TOKENS = 4096;   // 原文 + 译文；需与 vllm serve --max-model-len 8192 配套
+const OCR_MAX_SIDE   = 2048;   // 截图长边超过该像素时等比缩小，控制图像 token 数
+// 模型输出格式："图中的文字是\n<原文>\n翻译成中文为\n<译文>"
+const OCR_SRC_MARK   = "图中的文字是";
+const OCR_TRANS_MARK = "翻译成中文为";
+
 var chromeHandle = null;
 var styleSheetSvc = null;
 var styleURI = null;
+var katex = null;   // 启动时从 chrome/content/lib/katex.min.js 加载，用于渲染 LaTeX 公式
 
 // 每个 pane 实例的状态（key = body 上的 data-uid）
 const panels = new Map();
@@ -73,7 +87,17 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
     Zotero.debug(`[AI Translate] CSS 注册失败: ${e}`);
   }
 
-  // 4. 注册侧边栏 section（显示在 Zotero 条目面板右侧）
+  // 4. 加载 KaTeX：截图翻译结果中的 LaTeX 公式渲染为 MathML（Zotero 原生支持，无需字体）
+  try {
+    const scope = {};
+    scope.self = scope;   // KaTeX 的 UMD 包装会把 katex 挂到 self 上
+    Services.scriptloader.loadSubScript(rootURI + "chrome/content/lib/katex.min.js", scope);
+    katex = scope.katex || null;
+  } catch (e) {
+    Zotero.debug(`[AI Translate] KaTeX 加载失败: ${e}`);
+  }
+
+  // 5. 注册侧边栏 section（显示在 Zotero 条目面板右侧）
   Zotero.ItemPaneManager.registerSection({
     paneID:   "ai-translate",
     pluginID: ADDON_ID,
@@ -140,12 +164,13 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
         if (win && body._aitResize) win.removeEventListener("resize", body._aitResize);
       } catch (_) {}
       const uid = body.dataset.uid;
+      disposePanel(panels.get(uid));
       if (uid) panels.delete(uid);
     },
     onRender() {},
   });
 
-  // 5. 监听 PDF 选中文字事件
+  // 6. 监听 PDF 选中文字事件
   Zotero.Reader.registerEventListener(
     "renderTextSelectionPopup",
     onReaderSelection,
@@ -182,7 +207,9 @@ function shutdown({ id, version, resourceURI, rootURI }, reason) {
     L10nRegistry.getInstance().removeSources([ADDON_REF]);
   } catch (_) {}
 
+  for (const panel of panels.values()) disposePanel(panel);
   panels.clear();
+  katex = null;
 
   if (chromeHandle) { chromeHandle.destruct(); chromeHandle = null; }
 }
@@ -270,15 +297,45 @@ function h(doc, tag, attrs, children) {
   return el;
 }
 
-// 将 Markdown 文本直接渲染为 DOM 节点（不经过 innerHTML，与 UI 构建方式一致）
+// 行内 $…$ / \(…\) 与独立 $$…$$ / \[…\] 公式
+const MATH_RE = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+?\$)/g;
+
+// 将 Markdown 文本直接渲染为 DOM 节点（除 KaTeX 生成的 MathML 外不经过 innerHTML）
 // 支持：# 标题、**粗体**、`行内代码`、> 引用、--- 分割线、| 表格、段落
-function renderToDOM(raw, doc) {
+// opts.math：渲染 LaTeX 公式（仅用于截图翻译，避免普通文本里的 $ 被误判为公式）
+function renderToDOM(raw, doc, opts = {}) {
   const frag = doc.createDocumentFragment();
 
   function el(tag) { return doc.createElementNS(HTML_NS, tag); }
 
-  // 处理 **bold** 和 `code` 行内语法
+  // 用 KaTeX 渲染为 MathML；公式有误或 KaTeX 不可用时显示 LaTeX 原文
+  function appendMath(parent, part) {
+    const display = part.startsWith("$$") || part.startsWith("\\[");
+    const tex = (display || part.startsWith("\\(") ? part.slice(2, -2) : part.slice(1, -1)).trim();
+    const span = el("span");
+    span.className = display ? "ait-math ait-math-display" : "ait-math";
+    span.title = tex;
+    try {
+      span.innerHTML = katex.renderToString(tex, { output: "mathml", displayMode: display, throwOnError: true });
+    } catch (_) {
+      span.textContent = part;
+      span.classList.add("ait-math-raw");
+    }
+    parent.appendChild(span);
+  }
+
   function appendInline(parent, text) {
+    if (!opts.math || !katex) { appendRich(parent, text); return; }
+    // split 带捕获组：奇数下标是公式，偶数下标是普通文本
+    text.split(MATH_RE).forEach((part, i) => {
+      if (!part) return;
+      if (i % 2) appendMath(parent, part);
+      else appendRich(parent, part);
+    });
+  }
+
+  // 处理 **bold** 和 `code` 行内语法
+  function appendRich(parent, text) {
     const parts = text.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/g);
     for (const part of parts) {
       if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
@@ -418,7 +475,7 @@ function buildUI(body, doc) {
       const v = (getPref("apiBase", DEFAULT_API) || DEFAULT_API).replace(/\/+$/, "");
       return v === LEGACY_API ? DEFAULT_API : v;
     })(),
-    lastAiText:    "",  // 用于复制按钮
+    ocrApiBase:    (getPref("ocrApiBase", DEFAULT_OCR_API) || DEFAULT_OCR_API).replace(/\/+$/, ""),
   };
   const els = {};
   panels.set(uid, { state, els });
@@ -434,34 +491,41 @@ function buildUI(body, doc) {
     setPref("autoTranslate", autoCheck.checked);
   });
 
-  els.apiInput = h(doc, "input", {
-    className:   "ait-api-input",
-    type:        "text",
-    value:       state.apiBase,
-    placeholder: DEFAULT_API,
-    spellcheck:  "false",
-  });
-  els.apiInput.addEventListener("change", () => {
-    const v = els.apiInput.value.trim().replace(/\/+$/, "");
-    state.apiBase = v || DEFAULT_API;
-    els.apiInput.value = state.apiBase;
-    setPref("apiBase", state.apiBase);
-  });
+  // 服务地址胶囊：● 名称 地址。显示时省略 http://；回车或失焦后保存，清空恢复默认
+  els.endpoints = {};
+  const endpoint = (key, label, def) => {
+    const dot = h(doc, "span", { className: "ait-endpoint-dot" });
+    const input = h(doc, "input", {
+      className:   "ait-endpoint-input",
+      type:        "text",
+      value:       hostOf(state[key]),
+      placeholder: hostOf(def),
+      spellcheck:  "false",
+    });
+    input.addEventListener("change", () => {
+      const v = input.value.trim().replace(/\/+$/, "");
+      state[key] = v ? (/^https?:\/\//.test(v) ? v : "http://" + v) : def;
+      input.value = hostOf(state[key]);
+      setPref(key, state[key]);
+      refreshEndpoint({ state, els }, key);
+    });
+    input.addEventListener("keydown", e => { if (e.key === "Enter") input.blur(); });
+    els.endpoints[key] = { dot };
+    return h(doc, "label", { className: "ait-endpoint" }, [
+      dot,
+      h(doc, "span", { className: "ait-endpoint-label", text: label }),
+      input,
+    ]);
+  };
+  const transChip = endpoint("apiBase", "翻译", DEFAULT_API);
+  const ocrChip   = endpoint("ocrApiBase", "OCR", DEFAULT_OCR_API);
 
-  const copyBtn = h(doc, "button", { className: "ait-action-btn", type: "button", text: "复制",
-    onclick: () => {
-      if (!state.lastAiText) return;
-      try { doc.defaultView?.navigator?.clipboard?.writeText(state.lastAiText); } catch (_) {}
-      copyBtn.textContent = "已复制";
-      doc.defaultView?.setTimeout(() => { copyBtn.textContent = "复制"; }, 1500);
-    },
-  });
   const clearBtn = h(doc, "button", {
     className: "ait-action-btn ait-action-ghost", type: "button", text: "清空",
     onclick: () => panelClear({ state, els }),
   });
 
-  // ── 顶栏（双行）──
+  // ── 顶栏：标题行 + 服务地址行 ──
   const topbar = h(doc, "div", { className: "ait-topbar" }, [
     h(doc, "div", { className: "ait-topbar-row" }, [
       h(doc, "div", { className: "ait-topbar-left" }, [
@@ -474,28 +538,24 @@ function buildUI(body, doc) {
           h(doc, "span", { className: "ait-toggle-track" }),
           h(doc, "span", { className: "ait-toggle-label", text: "自动" }),
         ]),
+        clearBtn,
       ]),
     ]),
-    h(doc, "div", { className: "ait-topbar-row ait-ctrl-row" }, [
-      h(doc, "span", { className: "ait-api-label", text: "API" }),
-      els.apiInput,
-      copyBtn,
-      clearBtn,
-    ]),
+    h(doc, "div", { className: "ait-endpoints" }, [transChip, ocrChip]),
   ]);
 
   // ── 消息区（空状态 + 动态卡片）──
   els.empty = h(doc, "div", { className: "ait-empty" }, [
     h(doc, "div", { className: "ait-empty-icon", text: "✦" }),
     h(doc, "div", { text: "在 PDF 中选中英文，或在下方输入" }),
-    h(doc, "div", { className: "ait-empty-sub", text: "自动翻译为中文" }),
+    h(doc, "div", { className: "ait-empty-sub", text: "截图后在输入框 Ctrl+V，可翻译含公式的内容" }),
   ]);
   els.messages = h(doc, "div", { className: "ait-messages" }, [els.empty]);
 
   // ── 输入区 ──
   els.textarea = h(doc, "textarea", {
     className:   "ait-input",
-    placeholder: "输入英文…  Shift+Enter 换行，Enter 翻译",
+    placeholder: "输入英文，或 Ctrl+V 粘贴截图…  Enter 翻译",
     rows:        "1",
     spellcheck:  "false",
   });
@@ -523,47 +583,122 @@ function buildUI(body, doc) {
     els.sendBtn,
   ]);
 
+  // 粘贴截图：剪贴板里有图片时走截图翻译，否则按普通文本粘贴
+  els.textarea.addEventListener("paste", e => {
+    const file = imageFromTransfer(e.clipboardData);
+    if (!file) return;
+    e.preventDefault();
+    sendImage({ state, els }, file);
+  });
+
   const root = h(doc, "div", { className: "ait-root" }, [topbar, els.messages, inputArea]);
+
+  // 拖入图片文件到面板任意位置
+  root.addEventListener("dragover", e => {
+    const items = Array.from(e.dataTransfer?.items || []);
+    if (items.some(i => i.kind === "file" && i.type.startsWith("image/"))) e.preventDefault();
+  });
+  root.addEventListener("drop", e => {
+    const file = imageFromTransfer(e.dataTransfer);
+    if (!file) return;
+    e.preventDefault();
+    sendImage({ state, els }, file);
+  });
+
   body.appendChild(root);
+
+  // 面板高度变化时（拖动分隔条、缩放窗口），让最新一轮继续占满可视区
+  const win = doc.defaultView;
+  if (win?.ResizeObserver) {
+    els.messagesRO = new win.ResizeObserver(() => fitTurn({ els }));
+    els.messagesRO.observe(els.messages);
+  }
+
+  // 每 15 秒检测两个服务是否可用，更新地址胶囊上的圆点
+  const refreshAll = () => {
+    if (!els.messages.isConnected) return;
+    refreshEndpoint({ state, els }, "apiBase");
+    refreshEndpoint({ state, els }, "ocrApiBase");
+  };
+  refreshAll();
+  els.win = win;
+  els.pingTimer = win?.setInterval(refreshAll, 15000);
 }
 
 // ── 消息卡片 ──────────────────────────────────────────────────────────────────
 
-// 用户是否停在（接近）底部：用来决定流式输出时要不要自动跟随滚动
-function isNearBottom(el, threshold = 40) {
-  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
+// 每一轮翻译（原文卡 + 结果卡）放在一个 .ait-turn 里。
+// 最新一轮至少占满消息区的可视高度，并滚动到顶部：历史对话被推到上方，滚轮向上即可查看。
+
+// 让最新一轮的最小高度 = 可视高度 − 轮间距 − 底部内边距，
+// 这样才能滚到"上方只留一个轮间距"的位置，上一轮恰好完全移出视口
+function fitTurn(panel) {
+  const box = panel.els.messages, turn = panel.els.turn;
+  if (!box || !turn) return;
+  const cs = box.ownerDocument.defaultView.getComputedStyle(box);
+  const gap = parseFloat(cs.rowGap) || 0;
+  turn.style.minHeight = Math.max(0, box.clientHeight - gap - parseFloat(cs.paddingBottom)) + "px";
+}
+
+function startTurn(panel) {
+  const doc = panel.els.messages.ownerDocument;
+  if (panel.els.empty.parentElement === panel.els.messages)
+    panel.els.messages.removeChild(panel.els.empty);
+  if (panel.els.turn) panel.els.turn.style.minHeight = "";   // 上一轮恢复自然高度
+  panel.els.turn = h(doc, "div", { className: "ait-turn" });
+  panel.els.messages.appendChild(panel.els.turn);
+  fitTurn(panel);
+  return panel.els.turn;
+}
+
+// 把最新一轮滚到顶部，上方只留一个轮间距（.ait-messages 设置了 scroll-behavior: smooth）
+function scrollTurnToTop(panel) {
+  const box = panel.els.messages, turn = panel.els.turn;
+  if (!box || !turn) return;
+  const gap = parseFloat(box.ownerDocument.defaultView.getComputedStyle(box).rowGap) || 0;
+  box.scrollTop += turn.getBoundingClientRect().top - box.getBoundingClientRect().top - gap;
 }
 
 function appendUserMsg(panel, text) {
   const doc = panel.els.messages.ownerDocument;
-  if (panel.els.empty.parentElement === panel.els.messages)
-    panel.els.messages.removeChild(panel.els.empty);
   const content = h(doc, "div", { className: "ait-msg-content" });
   content.textContent = text;
   const card = h(doc, "div", { className: "ait-msg ait-msg-user" }, [
     h(doc, "div", { className: "ait-msg-label", text: "原文" }),
     content,
   ]);
-  panel.els.messages.appendChild(card);
-  panel.els.messages.scrollTop = panel.els.messages.scrollHeight;
+  startTurn(panel).appendChild(card);
 }
 
-function appendAiMsg(panel) {
+// 结果卡底部的「复制原文 / 复制译文」，读取 view.source / view.translation；完成后再显示
+function copyActions(doc, view) {
+  const copySrc = h(doc, "button", { className: "ait-mini-btn", type: "button", text: "复制原文",
+    onclick: () => copyText(doc, view.source, copySrc) });
+  const copyTrans = h(doc, "button", { className: "ait-mini-btn", type: "button", text: "复制译文",
+    onclick: () => copyText(doc, view.translation, copyTrans) });
+  return h(doc, "div", { className: "ait-card-actions", hidden: "" }, [copySrc, copyTrans]);
+}
+
+// 文本翻译结果卡：译文 + 复制按钮
+function appendAiMsg(panel, source) {
   const doc = panel.els.messages.ownerDocument;
-  const content = h(doc, "div", { className: "ait-msg-content ait-streaming" });
+  const view = { source, translation: "" };
+  view.content = h(doc, "div", { className: "ait-msg-content ait-streaming" });
   const cursor = doc.createElementNS(HTML_NS, "span");
   cursor.className = "ait-cursor";
-  content.appendChild(cursor);
+  view.content.appendChild(cursor);
+  view.actions = copyActions(doc, view);
   const card = h(doc, "div", { className: "ait-msg ait-msg-ai" }, [
     h(doc, "div", { className: "ait-msg-header" }, [
       h(doc, "span", { className: "ait-avatar", text: "AI" }),
       h(doc, "span", { className: "ait-msg-label", text: "译文" }),
     ]),
-    content,
+    view.content,
+    view.actions,
   ]);
-  panel.els.messages.appendChild(card);
-  panel.els.messages.scrollTop = panel.els.messages.scrollHeight;
-  return content;
+  (panel.els.turn || startTurn(panel)).appendChild(card);
+  scrollTurnToTop(panel);
+  return view;
 }
 
 // ── 面板状态 ──────────────────────────────────────────────────────────────────
@@ -574,11 +709,18 @@ function setStatus(panel, text, busy) {
     panel.els.statusDot.className = "ait-dot" + (busy ? " is-busy" : "");
 }
 
+// 面板销毁或插件卸载时：停止尺寸监听和服务检测定时器
+function disposePanel(panel) {
+  if (!panel) return;
+  try { panel.els.messagesRO?.disconnect(); } catch (_) {}
+  try { panel.els.win?.clearInterval(panel.els.pingTimer); } catch (_) {}
+}
+
 function panelClear(panel) {
-  panel.state.lastAiText   = "";
   panel.state.pending      = false;
   if (panel.els.textarea) { panel.els.textarea.value = ""; panel.els.textarea.style.height = ""; }
   panel.els.messages?.replaceChildren(panel.els.empty);
+  panel.els.turn = null;
   setStatus(panel, "就绪", false);
 }
 
@@ -602,7 +744,7 @@ async function sendMessage(panel, userText) {
   appendUserMsg(panel, userText);
 
   // 追加 AI 回复卡（带光标）
-  const aiContent = appendAiMsg(panel);
+  const view = appendAiMsg(panel, userText.trim());
   setStatus(panel, "翻译中…", true);
 
   let aiText = "";
@@ -620,43 +762,254 @@ async function sendMessage(panel, userText) {
 
     const finishReason = await xhrSSE(url, body, chunk => {
       aiText = (aiText + chunk).replace(/^\s+/, "");
-      // 渲染前先记录用户是否停在底部；若用户已往上滚去看历史，则不打断
-      const stick = isNearBottom(panel.els.messages);
+      // 不跟随滚动：本轮已对齐到顶部，译文在下方增长
       const frag = renderToDOM(aiText, doc);
       const cur = doc.createElementNS(HTML_NS, "span");
       cur.className = "ait-cursor";
       frag.appendChild(cur);
-      aiContent.replaceChildren(frag);
-      if (stick) panel.els.messages.scrollTop = panel.els.messages.scrollHeight;
+      view.content.replaceChildren(frag);
     });
 
-    aiContent.replaceChildren(renderToDOM(aiText, doc));
-    aiContent.className = "ait-msg-content";
+    view.content.replaceChildren(renderToDOM(aiText, doc));
+    view.content.className = "ait-msg-content";
+    view.translation = aiText;
+    view.actions.hidden = false;
 
-    panel.state.lastAiText = aiText;
     setStatus(panel, finishReason === "length" ? "完成（已达长度上限）" : "完成", false);
   } catch (err) {
     Zotero.debug(`[AI Translate] sendMessage 失败: ${err?.stack || err?.message || err}`);
-    aiContent.className = "ait-msg-content ait-error";
-    aiContent.textContent = "失败：" + (err?.message || "未知错误");
+    view.content.className = "ait-msg-content ait-error";
+    view.content.textContent = "失败：" + (err?.message || "未知错误");
     setStatus(panel, "失败", false);
   }
 
+  refreshEndpoint(panel, "apiBase");
+  panel.state.pending = false;
+}
+
+// ── 截图翻译 ──────────────────────────────────────────────────────────────────
+
+// 从剪贴板 / 拖放数据中取第一张图片
+function imageFromTransfer(dt) {
+  if (!dt) return null;
+  for (const item of Array.from(dt.items || [])) {
+    if (item.kind === "file" && item.type.startsWith("image/")) return item.getAsFile();
+  }
+  return Array.from(dt.files || []).find(f => f.type.startsWith("image/")) || null;
+}
+
+// 读入图片并统一转为 PNG data URL：透明背景填白，长边超过 OCR_MAX_SIDE 时等比缩小
+async function prepareImage(win, file) {
+  const src = await new Promise((resolve, reject) => {
+    const reader = new win.FileReader();
+    reader.onload  = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("读取图片失败"));
+    reader.readAsDataURL(file);
+  });
+  const img = new win.Image();
+  img.src = src;
+  await img.decode();
+  const scale = Math.min(1, OCR_MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.max(1, Math.round(img.naturalWidth * scale));
+  const hgt = Math.max(1, Math.round(img.naturalHeight * scale));
+  const canvas = win.document.createElementNS(HTML_NS, "canvas");
+  canvas.width = w;
+  canvas.height = hgt;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, w, hgt);
+  ctx.drawImage(img, 0, 0, w, hgt);
+  return canvas.toDataURL("image/png");
+}
+
+// 拆分模型输出 "图中的文字是\n<原文>\n翻译成中文为\n<译文>"
+// 流式输出时，末尾尚未收完整的标记前缀会被暂时隐藏
+function splitOcrOutput(raw) {
+  let text = raw.replace(/```[a-z]*\n?/gi, "");   // 去掉模型偶尔输出的代码围栏
+  const lead = text.trimStart();
+  if (OCR_SRC_MARK.startsWith(lead)) return { source: "", translation: "", hasTranslation: false };
+  if (lead.startsWith(OCR_SRC_MARK)) text = lead.slice(OCR_SRC_MARK.length).replace(/^[：:]/, "");
+
+  const i = text.indexOf(OCR_TRANS_MARK);
+  if (i < 0) {
+    for (let k = OCR_TRANS_MARK.length - 1; k > 0; k--) {
+      if (text.endsWith(OCR_TRANS_MARK.slice(0, k))) { text = text.slice(0, -k); break; }
+    }
+    return { source: text.trim(), translation: "", hasTranslation: false };
+  }
+  return {
+    source:         text.slice(0, i).trim(),
+    translation:    text.slice(i + OCR_TRANS_MARK.length).replace(/^[：:]/, "").trim(),
+    hasTranslation: true,
+  };
+}
+
+function copyText(doc, text, btn) {
+  if (!text) return;
+  try { doc.defaultView?.navigator?.clipboard?.writeText(text); } catch (_) {}
+  const old = btn.textContent;
+  btn.textContent = "已复制";
+  doc.defaultView?.setTimeout(() => { btn.textContent = old; }, 1500);
+}
+
+function appendUserImage(panel, dataURL) {
+  const doc = panel.els.messages.ownerDocument;
+  const card = h(doc, "div", { className: "ait-msg ait-msg-user" }, [
+    h(doc, "div", { className: "ait-msg-label", text: "截图" }),
+    h(doc, "div", { className: "ait-msg-content ait-msg-image-wrap" }, [
+      h(doc, "img", { className: "ait-msg-image", src: dataURL, alt: "截图" }),
+    ]),
+  ]);
+  startTurn(panel).appendChild(card);
+}
+
+// 截图翻译结果卡：可折叠的识别原文 + 译文 + 复制按钮
+function appendOcrMsg(panel) {
+  const doc = panel.els.messages.ownerDocument;
+  const view = { source: "", translation: "" };
+  view.sourceBody = h(doc, "div", { className: "ait-ocr-source-body" });
+  view.details = h(doc, "details", { className: "ait-ocr-source", open: "" }, [
+    h(doc, "summary", { text: "识别原文" }),
+    view.sourceBody,
+  ]);
+  view.trans = h(doc, "div", { className: "ait-ocr-trans" });
+  view.content = h(doc, "div", { className: "ait-msg-content ait-streaming" }, [view.details, view.trans]);
+  view.actions = copyActions(doc, view);
+  const card = h(doc, "div", { className: "ait-msg ait-msg-ai" }, [
+    h(doc, "div", { className: "ait-msg-header" }, [
+      h(doc, "span", { className: "ait-avatar", text: "AI" }),
+      h(doc, "span", { className: "ait-msg-label", text: "截图翻译" }),
+    ]),
+    view.content,
+    view.actions,
+  ]);
+  (panel.els.turn || startTurn(panel)).appendChild(card);
+  scrollTurnToTop(panel);
+  return view;
+}
+
+function renderOcr(view, doc, parts, streaming) {
+  const withCursor = frag => {
+    const cur = doc.createElementNS(HTML_NS, "span");
+    cur.className = "ait-cursor";
+    frag.appendChild(cur);
+    return frag;
+  };
+  // 译文开始输出后自动收起原文，只在切换的那一刻收起一次，之后尊重用户的展开/收起
+  if (parts.hasTranslation && !view.collapsed) { view.details.open = false; view.collapsed = true; }
+  const src = renderToDOM(parts.source, doc, { math: true });
+  view.sourceBody.replaceChildren(streaming && !parts.hasTranslation ? withCursor(src) : src);
+  const trans = renderToDOM(parts.translation, doc, { math: true });
+  view.trans.replaceChildren(streaming && parts.hasTranslation ? withCursor(trans) : trans);
+  view.source = parts.source;
+  view.translation = parts.translation;
+}
+
+async function sendImage(panel, file) {
+  if (panel.state.pending) return;
+  panel.state.pending = true;
+
+  const doc = panel.els.messages?.ownerDocument;
+  if (!doc) { panel.state.pending = false; return; }
+
+  let view = null;
+  try {
+    const dataURL = await prepareImage(doc.defaultView, file);
+    appendUserImage(panel, dataURL);
+    view = appendOcrMsg(panel);
+    setStatus(panel, "识别中…", true);
+
+    const url  = panel.state.ocrApiBase + "/v1/chat/completions";
+    const body = JSON.stringify({
+      model:    OCR_MODEL_NAME,
+      messages: [
+        { role: "system", content: "" },
+        { role: "user", content: [
+          { type: "image_url", image_url: { url: dataURL } },
+          { type: "text", text: OCR_PROMPT },
+        ] },
+      ],
+      max_tokens: OCR_MAX_TOKENS,
+      stream:     true,
+      ...OCR_SAMPLING,
+    });
+
+    let raw = "";
+    const finishReason = await xhrSSE(url, body, chunk => {
+      raw += chunk;
+      const parts = splitOcrOutput(raw);
+      if (parts.hasTranslation) setStatus(panel, "翻译中…", true);
+      renderOcr(view, doc, parts, true);
+    });
+
+    const parts = splitOcrOutput(raw);
+    renderOcr(view, doc, parts, false);
+    view.content.className = "ait-msg-content";
+    view.actions.hidden = false;
+    if (!parts.hasTranslation) view.details.open = true;   // 没有译文时展开原文
+
+    setStatus(panel,
+      finishReason === "length" ? "完成（已达长度上限）"
+        : parts.hasTranslation ? "完成" : "完成（模型未给出译文）",
+      false);
+  } catch (err) {
+    Zotero.debug(`[AI Translate] sendImage 失败: ${err?.stack || err?.message || err}`);
+    if (!view) { startTurn(panel); view = appendOcrMsg(panel); }   // 读图失败时单独成一轮
+    view.details.hidden = true;
+    view.content.className = "ait-msg-content ait-error";
+    view.trans.textContent = "失败：" + (err?.message || "未知错误");
+    setStatus(panel, "失败", false);
+  }
+
+  refreshEndpoint(panel, "ocrApiBase");
   panel.state.pending = false;
 }
 
 // ── XHR（mozBackgroundRequest 绕过 Firefox 私有网络访问限制）────────────────
 
+function newXHR() {
+  let xhr;
+  try {
+    xhr = new XMLHttpRequest();
+  } catch (_) {
+    xhr = Components.classes["@mozilla.org/xmlextras/xmlhttprequest;1"]
+      .createInstance(Components.interfaces.nsIXMLHttpRequest);
+  }
+  try { xhr.mozBackgroundRequest = true; } catch (_) {}
+  return xhr;
+}
+
+// 地址显示时省略 http://（https:// 保留）
+function hostOf(url) {
+  return url.replace(/^http:\/\//, "");
+}
+
+// 服务是否可用：GET /v1/models，3 秒超时
+function pingService(base) {
+  return new Promise(resolve => {
+    const xhr = newXHR();
+    xhr.open("GET", base + "/v1/models", true);
+    xhr.timeout = 3000;
+    xhr.onload    = () => resolve(xhr.status === 200);
+    xhr.onerror   = () => resolve(false);
+    xhr.ontimeout = () => resolve(false);
+    try { xhr.send(); } catch (_) { resolve(false); }
+  });
+}
+
+// 更新地址胶囊上的状态圆点：绿 = 可用，红 = 无法连接
+async function refreshEndpoint(panel, key) {
+  const ep = panel.els.endpoints?.[key];
+  if (!ep) return;
+  const base = panel.state[key];
+  const up = await pingService(base);
+  if (panel.state[key] !== base) return;   // 检测期间地址被改过，结果作废
+  ep.dot.className = "ait-endpoint-dot " + (up ? "is-up" : "is-down");
+}
+
 function xhrSSE(url, jsonBody, onChunk) {
   return new Promise((resolve, reject) => {
-    let xhr;
-    try {
-      xhr = new XMLHttpRequest();
-    } catch (_) {
-      xhr = Components.classes["@mozilla.org/xmlextras/xmlhttprequest;1"]
-        .createInstance(Components.interfaces.nsIXMLHttpRequest);
-    }
-    try { xhr.mozBackgroundRequest = true; } catch (_) {}
+    const xhr = newXHR();
     xhr.open("POST", url, true);
     xhr.setRequestHeader("Content-Type", "application/json");
     // 不用 XHR 的"总时长"超时：流式回答越长总耗时越久，会被误判超时。
@@ -723,7 +1076,8 @@ function xhrSSE(url, jsonBody, onChunk) {
         settle(() => resolve(finishReason));
       } catch (e) { settle(() => reject(e)); }
     };
-    xhr.onerror    = () => settle(() => reject(new Error("无法连接到 vLLM，请确认服务已启动")));
+    xhr.onerror    = () => settle(() => reject(new Error(
+      `无法连接到 ${url.replace(/\/v1\/.*$/, "")}，请确认服务已启动（hymt status）`)));
     xhr.ontimeout  = () => settle(() => reject(new Error("请求超时")));
     xhr.onabort    = () => settle(() => reject(new Error("已取消")));
     xhr.send(jsonBody);

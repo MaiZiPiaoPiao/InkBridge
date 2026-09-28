@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "AI 论文阅读助手",
-  "version": "1.0.9",
-  "description": "Zotero PDF 阅读器内的英文→中文学术翻译（本地 vLLM + HY-MT1.5）。",
+  "version": "1.1.0",
+  "description": "Zotero PDF 阅读器内的英文→中文学术翻译，支持含公式的截图翻译（本地 vLLM + HY-MT1.5 + HunyuanOCR-1.5）。",
   "author": "maipeng",
   "homepage_url": "https://github.com/maipeng/ai-paper-reader",
   "permissions": [
