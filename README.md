@@ -27,7 +27,8 @@ Zotero 插件 ──HTTP──┼──▶ vLLM :8002  HunyuanOCR-1.5    截图�
 
 - Zotero 8 / 9 / 10
 - NVIDIA GPU，显存 12 GB 以上（两个服务同时运行约占 9.3 GB）
-- Linux，conda
+- Linux (Win系统也可以实现，但需要自己配置)
+- Conda 、UV 等虚拟环境管理包
 
 ## 部署
 
@@ -175,8 +176,8 @@ cd zotero-plugin && zip -r -X ../inkbridge.xpi . && cd ..
 
 不打包、直接加载源码目录：
 
-1. 在 Zotero 配置目录的 `extensions` 文件夹中，新建一个名为 `ai-paper-reader@maipeng.com` 的文本文件。
-2. 文件内容写入本仓库 `zotero-plugin` 目录的绝对路径，即 `<仓库目录>/zotero-plugin`。
+1. 在 Zotero 配置目录的 `extensions` 文件夹中，新建一个名为 `InkBridge@maipeng.com` 的文本文件。
+2. 文件内容写入本仓库 `InkBridge` 目录的绝对路径，即 `<仓库目录>/InkBridge`。
 3. 重启 Zotero。修改后若未生效，用 `-purgecaches` 参数启动以清除缓存。
 
 ## 目录结构

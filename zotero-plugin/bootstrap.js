@@ -234,10 +234,7 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
   // 7. 已打开的主窗口挂上 F 快捷键（之后打开的窗口在 onMainWindowLoad 中挂）
   for (const win of Zotero.getMainWindows?.() || []) attachKeyHandler(win);
 
-  // 8. 清除旧版本留在磁盘缓存中的服务响应（新请求都已禁止缓存）
-  purgeCachedResponses();
-
-  // 9. 设置页：服务地址与词典在 Zotero「设置 → 墨桥·InkBridge」中配置（插件卸载时 Zotero 自动注销）
+  // 8. 设置页：服务地址与词典在 Zotero「设置 → 墨桥·InkBridge」中配置（插件卸载时 Zotero 自动注销）
   Zotero.AIPaperReader = { checkServices, pickDictFile };
   watchSettings();
   Zotero.PreferencePanes.register({
@@ -1476,33 +1473,6 @@ function openRequest(xhr, method, url) {
     xhr.channel.loadFlags |= nsIRequest.INHIBIT_CACHING | nsIRequest.LOAD_BYPASS_CACHE;
   } catch (_) {}
 }
-
-// 删除旧版本留在 Zotero 磁盘缓存中的本插件服务响应（如发音音频）
-function purgeCachedResponses() {
-  try {
-    const origins = ["apiBase", "ocrApiBase", "ttsApiBase"]
-      .map(key => getPref(key, "") || "")
-      .concat([DEFAULT_API, DEFAULT_OCR_API, DEFAULT_TTS_API])
-      .filter(Boolean)
-      .map(url => url.replace(/\/+$/, "") + "/");
-    const storage = Services.cache2.diskCacheStorage(Services.loadContextInfo.default);
-    const doomed = [];
-    storage.asyncVisitStorage({
-      QueryInterface: ChromeUtils.generateQI(["nsICacheStorageVisitor"]),
-      onCacheStorageInfo() {},
-      onCacheEntryInfo(uri, idEnhance) {
-        if (origins.some(o => uri.asciiSpec.startsWith(o))) doomed.push([uri, idEnhance]);
-      },
-      onCacheEntryVisitCompleted() {
-        for (const [uri, idEnhance] of doomed) storage.asyncDoomURI(uri, idEnhance, null);
-        if (doomed.length) Zotero.debug(`[AI Translate] 已清除 ${doomed.length} 条缓存的服务响应`);
-      },
-    }, true);
-  } catch (e) {
-    Zotero.debug(`[AI Translate] 清理缓存失败: ${e}`);
-  }
-}
-
 
 // 服务是否可用：vLLM 查 /v1/models，发音服务查 /health，3 秒超时
 function pingService(base, path = "/v1/models") {
