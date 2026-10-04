@@ -1,8 +1,10 @@
-<p align="center"><img src="Inkbridge.png" alt="墨桥·InkBridge" width="280"></p>
+<p align="center"><img src="docs/Inkbridge.png" alt="墨桥·InkBridge" width="280"></p>
 
 # 墨桥·InkBridge
 
 Zotero PDF 阅读器里的中英学术互译：选中即译、单词查词、带公式的截图翻译、英文发音。模型全部在本地电脑上运行，插件不调用任何在线服务。
+
+![截图翻译示例：左侧为 PDF 原文，右侧面板识别出原文并译成中文，公式保留为 LaTeX 渲染](docs/screenshot.png)
 
 ## 组件
 
@@ -18,18 +20,16 @@ Zotero PDF 阅读器里的中英学术互译：选中即译、单词查词、带
 组件之间的关系：
 
 - **查词与翻译**：选中单词或短语（不超过 4 个词）、或 1–8 个汉字时，先查词典；词典未配置或查不到，再交给文本翻译。所以只装词典时只能查词，不能翻译句子；只装文本翻译时也能翻译单词，但没有音标和完整词义。
-- **截图翻译**：该功能是独立的，不依赖其他组件。
+- **截图翻译**：默认使用系统自带的截图功能，该功能是独立的，不依赖其他组件。
 - **发音**：发音按钮始终显示，没有部署发音服务时，点击会提示不可用。
 - **显存**：文本翻译和截图翻译同时运行约占 9.3 GB 显存，建议显卡显存 12 GB 以上。
-- **跨电脑使用**：组件可以部署在另一台电脑上，在设置页填写那台电脑的地址即可。
+- **跨电脑使用**：组件可以部署在另一台电脑上，例如在家里使用办公室电脑的显卡，见[远程访问](#远程访问)。
 
 ## 安装插件
 
 1. 从 [Releases](https://github.com/MaiZiPiaoPiao/InkBridge/releases/latest) 下载 `inkbridge.xpi`，或在仓库根目录运行 `python3 tools/build_xpi.py` 自行打包（生成 `dist/inkbridge.xpi`）。
 2. 在 Zotero「工具 → 插件」中，点齿轮菜单 →「从文件安装插件」，选择 `inkbridge.xpi`，然后重启 Zotero。之后 Zotero 会自动更新插件。
 3. 按下文部署需要的组件，再到 Zotero「设置 → 墨桥·InkBridge」中填写服务地址、选择词典文件，然后点「测试连接」。未部署的服务显示「无法连接」，未选择词典显示「未设置」，都不影响其他功能。
-
-> 安装过早期自行打包版本（插件 ID 为 `ai-paper-reader@maipeng.com`）的用户：请先删除旧版再安装。新版的设置项名称已更改，服务地址和词典需要重新设置。
 
 需要 Zotero 8 / 9 / 10。
 
@@ -105,6 +105,32 @@ curl -LO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-fil
 
 python3 <仓库目录>/tools/tts_server.py --model-dir <MODEL_DIR>/kokoro --port 8003
 ```
+
+## 远程访问
+
+上面的服务都只监听 `127.0.0.1`，只有本机能访问。要从另一台电脑使用，按两台电脑的位置选择：
+
+**同一局域网**：启动服务时把 `--host 127.0.0.1` 改为 `--host 0.0.0.0`（发音服务加上 `--host 0.0.0.0`），在另一台电脑的设置页填写 `<服务器局域网 IP>:8001` 等地址。注意：服务没有密码，同一局域网内的任何人都能使用。
+
+**不在同一局域网（推荐 Tailscale）**：[Tailscale](https://tailscale.com) 把你的设备连成一个加密的私有网络，只有登录同一账号的设备才能互相访问，不需要公网 IP，也不用在路由器上做端口映射。服务保持只监听 `127.0.0.1`，由 Tailscale 转发进来：
+
+1. 两台电脑都[安装 Tailscale](https://tailscale.com/download)，并用同一个账号登录。Windows、macOS 有图形客户端。
+2. 在运行组件的电脑上，为已部署的服务开启转发：
+
+   ```bash
+   sudo tailscale up
+   tailscale ip -4      # 本机的 Tailscale IP，形如 100.x.y.z
+   sudo tailscale serve --bg --tcp 8001 tcp://127.0.0.1:8001
+   sudo tailscale serve --bg --tcp 8002 tcp://127.0.0.1:8002
+   sudo tailscale serve --bg --tcp 8003 tcp://127.0.0.1:8003
+   ```
+
+   用 `tailscale serve status` 查看转发，`sudo tailscale serve reset` 清除全部转发。
+3. 在另一台电脑的设置页填写 `100.x.y.z:8001`、`100.x.y.z:8002`、`100.x.y.z:8003`。运行组件的电脑本机继续使用默认地址。
+
+无论哪种方式，词典都是插件直接读取的本地文件，需要复制到另一台电脑，再在设置页中选择。
+
+如果开着 Clash / Mihomo 等代理软件的 TUN 或 fake-ip 模式，`tailscale up` 可能一直卡住。解决方法：把 `+.tailscale.com`、`+.tailscale.io`、`+.ts.net` 加入 `dns.fake-ip-filter`，把 `100.64.0.0/10` 加入 `tun.route-exclude-address`。两台电脑都开着代理时，两边都要这样设置。
 
 ## 使用
 
