@@ -1,12 +1,12 @@
 /* global Zotero, window, document */
-// 「墨桥·InkBridge」设置页脚本：在设置窗口的沙箱中运行，通过 Zotero.AIPaperReader 调用插件
+// 「墨桥·InkBridge」设置页脚本：在设置窗口的沙箱中运行，通过 Zotero.InkBridge 调用插件
 
 window.AITPrefs = {
   keys: ["apiBase", "ocrApiBase", "ttsApiBase", "dictPath"],
 
   init() {
     document.getElementById("ait-pref-dict-pick").addEventListener("command", async () => {
-      await Zotero.AIPaperReader?.pickDictFile(window);
+      await Zotero.InkBridge?.pickDictFile(window);
       this.test();
     });
     document.getElementById("ait-pref-test").addEventListener("command", () => this.test());
@@ -15,7 +15,7 @@ window.AITPrefs = {
 
   // 检测三个服务与词典，结果显示在各行右侧
   async test() {
-    const api = Zotero.AIPaperReader;
+    const api = Zotero.InkBridge;
     if (!api) return;
     const show = (key, text, cls) => {
       const el = document.getElementById("ait-status-" + key);

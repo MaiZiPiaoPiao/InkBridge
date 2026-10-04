@@ -1,4 +1,4 @@
-ai-paper-reader-section-header =
+inkbridge-section-header =
     .label = 墨桥·InkBridge
-ai-paper-reader-section-sidenav =
+inkbridge-section-sidenav =
     .tooltiptext = 墨桥·InkBridge

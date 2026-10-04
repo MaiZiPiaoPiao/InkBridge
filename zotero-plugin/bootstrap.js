@@ -2,9 +2,9 @@
 
 // ── 常量 ────────────────────────────────────────────────────────────────────
 
-const ADDON_ID    = "ai-paper-reader@maipeng.com";
-const ADDON_REF   = "ai-paper-reader";
-const PREF_KEY    = "extensions.ai-paper-reader.";
+const ADDON_ID    = "inkbridge@maipeng.com";
+const ADDON_REF   = "inkbridge";
+const PREF_KEY    = "extensions.inkbridge.";
 const DEFAULT_API = "http://127.0.0.1:8001";   // 本地 vLLM 服务（OpenAI 兼容接口）
 const LEGACY_API  = "http://127.0.0.1:8000";   // 旧版 FastAPI 后端地址，自动迁移到 DEFAULT_API
 const HTML_NS     = "http://www.w3.org/1999/xhtml";
@@ -110,7 +110,7 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
   if (!rootURI) rootURI = resourceURI.spec;
   if (!rootURI.endsWith("/")) rootURI += "/";
 
-  // 1. 注册 chrome URI，使 chrome://ai-paper-reader/content/... 可访问
+  // 1. 注册 chrome URI，使 chrome://inkbridge/content/... 可访问
   const aomStartup = Components.classes["@mozilla.org/addons/addon-manager-startup;1"]
     .getService(Components.interfaces.amIAddonManagerStartup);
   chromeHandle = aomStartup.registerChrome(
@@ -126,7 +126,7 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
     const src = new FileSource(ADDON_REF, ["en-US"], rootURI + "locale/{locale}/");
     L10nRegistry.getInstance().registerSources([src]);
   } catch (e) {
-    Zotero.debug(`[AI Translate] L10nRegistry 注册失败: ${e}`);
+    Zotero.debug(`[InkBridge] L10nRegistry 注册失败: ${e}`);
   }
 
   // 3. 全局注册 CSS（AUTHOR_SHEET 在所有窗口中生效）
@@ -138,7 +138,7 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
       styleSheetSvc.loadAndRegisterSheet(styleURI, styleSheetSvc.AUTHOR_SHEET);
     }
   } catch (e) {
-    Zotero.debug(`[AI Translate] CSS 注册失败: ${e}`);
+    Zotero.debug(`[InkBridge] CSS 注册失败: ${e}`);
   }
 
   // 4. 加载 KaTeX：截图翻译结果中的 LaTeX 公式渲染为 MathML（Zotero 原生支持，无需字体）
@@ -148,19 +148,19 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
     Services.scriptloader.loadSubScript(rootURI + "chrome/content/lib/katex.min.js", scope);
     katex = scope.katex || null;
   } catch (e) {
-    Zotero.debug(`[AI Translate] KaTeX 加载失败: ${e}`);
+    Zotero.debug(`[InkBridge] KaTeX 加载失败: ${e}`);
   }
 
   // 5. 注册侧边栏 section（显示在 Zotero 条目面板右侧）
   Zotero.ItemPaneManager.registerSection({
-    paneID:   "ai-translate",
+    paneID:   "inkbridge",
     pluginID: ADDON_ID,
     header: {
-      l10nID: "ai-paper-reader-section-header",
+      l10nID: "inkbridge-section-header",
       icon:   `chrome://${ADDON_REF}/content/icons/inkbridge-16.svg`,
     },
     sidenav: {
-      l10nID: "ai-paper-reader-section-sidenav",
+      l10nID: "inkbridge-section-sidenav",
       icon:   `chrome://${ADDON_REF}/content/icons/inkbridge-20.svg`,
     },
     onInit({ body, doc }) {
@@ -235,7 +235,7 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
   for (const win of Zotero.getMainWindows?.() || []) attachKeyHandler(win);
 
   // 8. 设置页：服务地址与词典在 Zotero「设置 → 墨桥·InkBridge」中配置（插件卸载时 Zotero 自动注销）
-  Zotero.AIPaperReader = { checkServices, pickDictFile };
+  Zotero.InkBridge = { checkServices, pickDictFile };
   watchSettings();
   Zotero.PreferencePanes.register({
     pluginID:    ADDON_ID,
@@ -262,7 +262,7 @@ function shutdown({ id, version, resourceURI, rootURI }, reason) {
   if (reason === APP_SHUTDOWN) return;
 
   try { Zotero.Reader.unregisterEventListener("renderTextSelectionPopup", onReaderSelection); } catch (_) {}
-  try { Zotero.ItemPaneManager.unregisterSection("ai-translate"); } catch (_) {}
+  try { Zotero.ItemPaneManager.unregisterSection("inkbridge"); } catch (_) {}
 
   try {
     if (styleSheetSvc && styleURI &&
@@ -280,7 +280,7 @@ function shutdown({ id, version, resourceURI, rootURI }, reason) {
 
   detachKeyHandlers();
   unwatchSettings();
-  delete Zotero.AIPaperReader;
+  delete Zotero.InkBridge;
   for (const panel of panels.values()) disposePanel(panel);
   panels.clear();
   closeDict();
@@ -888,7 +888,7 @@ function playTTS(panel, segments, accent, btn) {
     } catch (e) {
       if (!alive()) return;
       stopAudio(panel);
-      setStatus(panel, e.message === "play" ? "无法播放音频" : "发音服务不可用（hymt tts）", false);
+      setStatus(panel, e.message === "play" ? "无法播放音频" : "发音服务不可用", false);
     }
   })();
 }
@@ -1084,7 +1084,7 @@ async function sendMessage(panel, userText) {
       return;
     }
   } catch (e) {
-    Zotero.debug(`[AI Translate] 查词失败: ${e}`);
+    Zotero.debug(`[InkBridge] 查词失败: ${e}`);
   }
 
   // 追加 AI 回复卡（带光标）
@@ -1121,7 +1121,7 @@ async function sendMessage(panel, userText) {
 
     setStatus(panel, finishReason === "length" ? "完成（已达长度上限）" : "完成", false);
   } catch (err) {
-    Zotero.debug(`[AI Translate] sendMessage 失败: ${err?.stack || err?.message || err}`);
+    Zotero.debug(`[InkBridge] sendMessage 失败: ${err?.stack || err?.message || err}`);
     view.content.className = "ait-msg-content ait-error";
     view.content.textContent = "失败：" + (err?.message || "未知错误");
     setStatus(panel, "失败", false);
@@ -1167,7 +1167,7 @@ function openDict(path) {
       if (dict.promise === promise) dict.oldFormat = format.startsWith("ai-paper-ecdict-");
       await conn.close();
     } catch (e) {
-      Zotero.debug(`[AI Translate] 词典打开失败: ${e}`);
+      Zotero.debug(`[InkBridge] 词典打开失败: ${e}`);
     }
     if (dict.promise === promise) dict.promise = null;
     return null;
@@ -1440,7 +1440,7 @@ async function sendImage(panel, file) {
         : parts.hasTranslation ? "完成" : "完成（模型未给出译文）",
       false);
   } catch (err) {
-    Zotero.debug(`[AI Translate] sendImage 失败: ${err?.stack || err?.message || err}`);
+    Zotero.debug(`[InkBridge] sendImage 失败: ${err?.stack || err?.message || err}`);
     if (!view) { startTurn(panel); view = appendOcrMsg(panel); }   // 读图失败时单独成一轮
     view.details.hidden = true;
     view.content.className = "ait-msg-content ait-error";
@@ -1487,7 +1487,7 @@ function pingService(base, path = "/v1/models") {
   });
 }
 
-// ── 设置页接口（preferences.js 通过 Zotero.AIPaperReader 调用）───────────────
+// ── 设置页接口（preferences.js 通过 Zotero.InkBridge 调用）───────────────
 
 // 检测三个服务与词典：{ apiBase, ocrApiBase, ttsApiBase: bool, dictPath: "ok" | "old" | "invalid" | "unset" }
 async function checkServices() {
@@ -1587,7 +1587,7 @@ function xhrSSE(url, jsonBody, onChunk) {
       } catch (e) { settle(() => reject(e)); }
     };
     xhr.onerror    = () => settle(() => reject(new Error(
-      `无法连接到 ${url.replace(/\/v1\/.*$/, "")}，请确认服务已启动（hymt status）`)));
+      `无法连接到 ${url.replace(/\/v1\/.*$/, "")}，请确认服务已启动`)));
     xhr.ontimeout  = () => settle(() => reject(new Error("请求超时")));
     xhr.onabort    = () => settle(() => reject(new Error("已取消")));
     xhr.send(jsonBody);

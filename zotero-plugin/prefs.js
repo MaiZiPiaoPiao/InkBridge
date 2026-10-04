@@ -1,8 +1,8 @@
-pref("extensions.ai-paper-reader.autoTranslate", true);
-pref("extensions.ai-paper-reader.autoScroll", true);
-pref("extensions.ai-paper-reader.panelOpen", true);
-pref("extensions.ai-paper-reader.apiBase", "http://127.0.0.1:8001");
-pref("extensions.ai-paper-reader.ocrApiBase", "http://127.0.0.1:8002");
-pref("extensions.ai-paper-reader.mergeSelections", false);
-pref("extensions.ai-paper-reader.dictPath", "");
-pref("extensions.ai-paper-reader.ttsApiBase", "http://127.0.0.1:8003");
+pref("extensions.inkbridge.autoTranslate", true);
+pref("extensions.inkbridge.autoScroll", true);
+pref("extensions.inkbridge.panelOpen", true);
+pref("extensions.inkbridge.apiBase", "http://127.0.0.1:8001");
+pref("extensions.inkbridge.ocrApiBase", "http://127.0.0.1:8002");
+pref("extensions.inkbridge.mergeSelections", false);
+pref("extensions.inkbridge.dictPath", "");
+pref("extensions.inkbridge.ttsApiBase", "http://127.0.0.1:8003");

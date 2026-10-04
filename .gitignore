@@ -14,3 +14,7 @@
 # 编辑器 / Python 缓存
 .vscode/
 __pycache__/
+.claude/
+
+# 打包输出（tools/build_xpi.py）
+/dist/

@@ -2,207 +2,133 @@
 
 # 墨桥·InkBridge
 
-在 Zotero PDF 阅读器里选中即可翻译；截图可以翻译带公式的段落，公式会保留为 LaTeX 并直接渲染。
+Zotero PDF 阅读器里的中英学术互译：选中即译、单词查词、带公式的截图翻译、英文发音。模型全部在本地电脑上运行，插件不调用任何在线服务。
 
-模型全部在本地运行，插件直接调用 vLLM 的 OpenAI 兼容接口，不需要额外的后端。
+## 组件
 
-```text
-                    ┌──▶ vLLM :8001  HY-MT1.5-1.8B     文本翻译
-Zotero 插件 ──HTTP──┼──▶ vLLM :8002  HunyuanOCR-1.5    截图识别 + 翻译
-                    └──▶ TTS  :8003  Kokoro-82M        单词发音（CPU）
-```
+插件本身只提供界面，各项功能由下面四个组件提供。**每个组件都是选装的**，部署了哪个，就能用哪项功能：
 
-## 功能
+| 组件                       | 提供的功能                                   | 运行条件                        |
+| -------------------------- | -------------------------------------------- | ------------------------------- |
+| 文本翻译（HY-MT1.5-1.8B）  | 选中或输入文字后翻译，英译中、中译英自动判断 | NVIDIA 显卡 + vLLM              |
+| 截图翻译（HunyuanOCR-1.5） | 识别截图并翻译，公式保留为 LaTeX 并渲染      | NVIDIA 显卡 + vLLM              |
+| 离线词典（ECDICT）         | 英文单词查词、中文词反查英文                 | 一个约 78 MB 的文件，不需要显卡 |
+| 发音（Kokoro-82M）         | 单词发音、朗读卡片中的英文                   | 只需 CPU                        |
 
-- **选中翻译**：在 PDF 中选中英文后自动翻译，流式输出。每次翻译都是独立请求，不携带历史，只输出译文。
-- **单词查词**：选中单个单词或短语（不超过 4 个词）时，从离线词典 ECDICT 中给出音标、考试标签和按词性分行的全部词义，以及词形变化；词典查不到时自动交给翻译模型。
-- **中译英**：输入或选中的文字以中文为主时自动译成英文。中文词（1–8 个汉字）从词典中反查，列出最多 8 个英文候选词及对应释义；中文句子交给翻译模型。
-- **发音与朗读**：词典卡片中每个英文单词旁有「英 🔊」「美 🔊」按钮；翻译结果卡片底部有「朗读 英 🔊 美 🔊」，逐句朗读卡片中的英文，再次点击可停止。
-- **手动翻译与跨页合并**：关闭 `自动` 开关后，选中的文字先放进输入框，按 F（或在输入框中按 Enter）再翻译。再打开 `合并` 开关，多次选中的文字会合并后一起翻译，适合跨页、跨栏的段落；行尾断词（如 `compu-` + `tation`）会自动拼回。
-- **截图翻译**：截图后在输入框按 Ctrl+V，或把图片拖进面板。先识别原文，再输出译文；公式保留为 LaTeX，并用 KaTeX 渲染。自动判断截图语言：英文截图译成中文，中文截图译成英文。
-- **设置页**：服务地址与词典文件在 Zotero「设置 → 墨桥·InkBridge」中配置，面板上不显示；「测试连接」可查看各服务和词典是否可用。请求失败时，面板状态栏会提示是哪个服务不可用。
-- **不留痕迹**：对话历史、截图、发音音频都只在内存中，关闭 Zotero 后不保留；插件的请求均不写入 Zotero 的磁盘缓存。
+组件之间的关系：
 
-## 环境要求
+- **查词与翻译**：选中单词或短语（不超过 4 个词）、或 1–8 个汉字时，先查词典；词典未配置或查不到，再交给文本翻译。所以只装词典时只能查词，不能翻译句子；只装文本翻译时也能翻译单词，但没有音标和完整词义。
+- **截图翻译**：该功能是独立的，不依赖其他组件。
+- **发音**：发音按钮始终显示，没有部署发音服务时，点击会提示不可用。
+- **显存**：文本翻译和截图翻译同时运行约占 9.3 GB 显存，建议显卡显存 12 GB 以上。
+- **跨电脑使用**：组件可以部署在另一台电脑上，在设置页填写那台电脑的地址即可。
 
-- Zotero 8 / 9 / 10
-- NVIDIA GPU，显存 12 GB 以上（两个服务同时运行约占 9.3 GB）
-- Linux (Win系统也可以实现，但需要自己配置)
-- Conda 、UV 等虚拟环境管理包
+## 安装插件
 
-## 部署
+1. 从 [Releases](https://github.com/MaiZiPiaoPiao/InkBridge/releases/latest) 下载 `inkbridge.xpi`，或在仓库根目录运行 `python3 tools/build_xpi.py` 自行打包（生成 `dist/inkbridge.xpi`）。
+2. 在 Zotero「工具 → 插件」中，点齿轮菜单 →「从文件安装插件」，选择 `inkbridge.xpi`，然后重启 Zotero。之后 Zotero 会自动更新插件。
+3. 按下文部署需要的组件，再到 Zotero「设置 → 墨桥·InkBridge」中填写服务地址、选择词典文件，然后点「测试连接」。未部署的服务显示「无法连接」，未选择词典显示「未设置」，都不影响其他功能。
 
-### 1. 安装 vLLM
+> 安装过早期自行打包版本（插件 ID 为 `ai-paper-reader@maipeng.com`）的用户：请先删除旧版再安装。新版的设置项名称已更改，服务地址和词典需要重新设置。
 
-```bash
-conda create -n vllm python=3.12 -y
-conda activate vllm
-pip install uv
-uv pip install vllm --torch-backend=auto
-```
+需要 Zotero 8 / 9 / 10。
 
-### 2. 下载模型
+## 部署组件
 
-下文用 `<MODEL_DIR>` 表示存放模型的目录，请替换为你自己的路径。模型权重不包含在本仓库中。
+以下步骤在 Linux 上测试通过；Windows 也可以部署，但需要自行调整命令。`<MODEL_DIR>` 是存放模型的目录，请替换为你自己的路径。
+
+### 文本翻译、截图翻译
+
+两者都基于 vLLM，先安装一次 vLLM：
 
 ```bash
-# 文本翻译：HY-MT1.5-1.8B（约 4 GB）
+conda create -n vllm python=3.12 -y && conda activate vllm
+pip install uv && uv pip install vllm --torch-backend=auto
+```
+
+只下载需要的模型：
+
+```bash
+# 文本翻译（约 4 GB）
 pip install modelscope
 modelscope download --model Tencent-Hunyuan/HY-MT1.5-1.8B --local_dir <MODEL_DIR>/HY-MT1.5-1.8B
 
-# 截图识别：HunyuanOCR-1.5（约 2.3 GB）
-# HuggingFace 仓库根目录是 1.5 版本；v1.0/、dflash/、assets/ 不需要
+# 截图翻译（约 2.3 GB；仓库根目录即 1.5 版本，其余子目录不需要）
 hf download tencent/HunyuanOCR --exclude 'v1.0/*' --exclude 'dflash/*' --exclude 'assets/*' \
     --local-dir <MODEL_DIR>/HunyuanOCR-1.5
 ```
 
-国内网络可以在 `hf download` 前加 `HF_ENDPOINT=https://hf-mirror.com`。如果终端设置了 `socks://` 格式的代理变量，`hf` 会报 `Unknown scheme for proxy URL`，可用 `env -u ALL_PROXY -u all_proxy hf download ...` 临时去掉。
+国内网络可在 `hf download` 前加 `HF_ENDPOINT=https://hf-mirror.com`。
 
-### 3. 生成词典（可选，用于单词查词和中文词反查）
+启动服务，看到 `Application startup complete` 即可使用。两个都要启动时，请等前一个就绪后再启动下一个，否则显存探测会互相干扰：
 
-词典数据来自 [ECDICT](https://github.com/skywind3000/ECDICT)（约 77 万词条）。运行仓库中的脚本，自动下载并生成 SQLite 词典（约 78 MB，只依赖 Python 标准库）：
+```bash
+# 文本翻译（约 30 秒就绪）
+VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve <MODEL_DIR>/HY-MT1.5-1.8B \
+    --served-model-name hy-mt --host 127.0.0.1 --port 8001 \
+    --max-model-len 4096 --gpu-memory-utilization 0.3 --enforce-eager
+
+# 截图翻译（约 55 秒就绪）
+VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve <MODEL_DIR>/HunyuanOCR-1.5 \
+    --served-model-name hy-ocr --host 127.0.0.1 --port 8002 --trust-remote-code \
+    --limit-mm-per-prompt '{"image":1,"video":0}' \
+    --max-model-len 8192 --max-num-batched-tokens 8192 \
+    --gpu-memory-utilization 0.35 --enforce-eager
+```
+
+- `--enforce-eager` 必须加：vLLM 对混元系列使用 transformers 实现，与 CUDA 图捕获冲突。
+- `VLLM_USE_FLASHINFER_SAMPLER=0`：没有安装 CUDA 编译器 `nvcc` 时需要。
+- `--served-model-name` 必须与上面一致；截图翻译的 `--gpu-memory-utilization` 不能低于 0.35。
+- 启动后第一次翻译较长文本时可能卡住几十秒（Triton 在编译内核），之后恢复正常。
+
+### 离线词典
+
+数据来自 [ECDICT](https://github.com/skywind3000/ECDICT)（约 77 万词条）。运行脚本自动下载并生成词典，只依赖 Python 标准库：
 
 ```bash
 python3 tools/build_ecdict.py <MODEL_DIR>/ecdict.db
 ```
 
-已下载 `ecdict.csv` 时可用 `--csv ecdict.csv` 跳过下载。生成后在 Zotero「设置 → 墨桥·InkBridge → 离线词典」中选择该文件。不设置词典时，选中单词也会交给翻译模型。
+已下载 `ecdict.csv` 时可加 `--csv ecdict.csv` 跳过下载。插件更新后，如果「测试连接」显示词典「需重新生成」，重新运行上面的命令即可。
 
-词典格式随插件更新：若设置页中「测试连接」显示「需重新生成」，重新运行上面的命令即可（约 3 秒）。
+### 发音
 
-### 4. 发音与朗读（可选）
-
-发音服务是仓库中的 `tools/tts_server.py`，使用 [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) 在 CPU 上运行，建议放在独立环境中：
+`tools/tts_server.py` 使用 [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) 在 CPU 上合成语音，占用约 250 MB 内存。需要系统安装 espeak-ng（Ubuntu：`sudo apt install espeak-ng`）。
 
 ```bash
-conda create -n tts python=3.12 -y
-conda activate tts
+conda create -n tts python=3.12 -y && conda activate tts
 pip install kokoro-onnx
 
-# 模型文件（int8 量化版约 92 MB + 音色 28 MB）
 mkdir -p <MODEL_DIR>/kokoro && cd <MODEL_DIR>/kokoro
 curl -LO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx
 curl -LO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+
+python3 <仓库目录>/tools/tts_server.py --model-dir <MODEL_DIR>/kokoro --port 8003
 ```
-
-音素转换依赖系统的 espeak-ng（Ubuntu 可用 `sudo apt install espeak-ng` 安装）。
-
-### 5. 启动服务
-
-两个服务依次启动（同时启动时两者的显存探测会互相干扰）：
-
-```bash
-# 文本翻译（约 30 秒就绪）
-VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve <MODEL_DIR>/HY-MT1.5-1.8B \
-    --served-model-name hy-mt \
-    --host 127.0.0.1 --port 8001 \
-    --max-model-len 4096 \
-    --gpu-memory-utilization 0.3 \
-    --enforce-eager
-
-# 截图识别（约 55 秒就绪）
-VLLM_USE_FLASHINFER_SAMPLER=0 vllm serve <MODEL_DIR>/HunyuanOCR-1.5 \
-    --served-model-name hy-ocr \
-    --host 127.0.0.1 --port 8002 \
-    --trust-remote-code \
-    --limit-mm-per-prompt '{"image":1,"video":0}' \
-    --max-model-len 8192 \
-    --max-num-batched-tokens 8192 \
-    --gpu-memory-utilization 0.35 \
-    --enforce-eager
-```
-
-看到 `Application startup complete` 后即可在 Zotero 中使用。
-
-| 参数                              | 说明                                                                       |
-| --------------------------------- | -------------------------------------------------------------------------- |
-| `--enforce-eager`               | 必需。vLLM 对 HunYuan 系列使用 transformers 实现，与 CUDA 图捕获冲突       |
-| `VLLM_USE_FLASHINFER_SAMPLER=0` | 没有安装 CUDA 编译器`nvcc` 时需要，改用 PyTorch 采样实现                 |
-| `--served-model-name`           | 必须与插件中的`MODEL_NAME` / `OCR_MODEL_NAME` 一致                     |
-| `--max-model-len`               | 与插件的`MAX_INPUT_CHARS`、`OCR_MAX_TOKENS` 配套，调小时需同步修改插件 |
-| `--gpu-memory-utilization`      | OCR 服务低于 0.35 时 KV 缓存不足，无法启动                                 |
-
-启动后第一次翻译较长文本时，Triton 会现场编译内核，可能卡住几十秒，之后恢复正常。
-
-### 6. 启动服务（可选）
-
-发音服务（约 2 秒就绪，占用约 250 MB 内存）：
-
-```bash
-conda activate tts
-python3 tools/tts_server.py --model-dir <MODEL_DIR>/kokoro --port 8003
-```
-
-每个单词首次合成约 0.5–1 秒，之后命中缓存可立即播放。
-
-## 安装插件
-
-在仓库根目录打包：
-
-```bash
-rm -f inkbridge.xpi
-cd zotero-plugin && zip -r -X ../inkbridge.xpi . && cd ..
-```
-
-在 Zotero 的「工具 → 插件」中，点齿轮菜单 →「从文件安装插件」，选择 `inkbridge.xpi`，然后重启 Zotero。
 
 ## 使用
 
-1. 打开一篇 PDF，在右侧条目面板中找到「墨桥·InkBridge」。
-2. **选中翻译**：在 PDF 中选中英文。选中的是单词或短语时，会显示词典释义。中文内容会自动译成英文，也可以在输入框里直接输入中文。
-3. **手动翻译与跨页合并**：关闭顶部的 `自动` 开关，选中文字后按 F 翻译。需要合并时打开 `合并` 开关，依次选中上一页末尾和下一页开头的文字，状态栏会显示「已合并 N 段」，然后按 F 一起翻译。F 只在有待翻译文本、且没有在输入框或批注中打字时生效；`合并` 在自动模式下不起作用。
-4. **截图翻译**：用系统截图工具框选区域（GNOME 下按 PrtSc，截图会自动复制到剪贴板），点一下面板底部的输入框，按 Ctrl+V。中文截图会先识别出开头几个字，判断为中文后自动改为译成英文。
-5. **发音与朗读**：点击词典卡片中单词旁的「英 🔊」「美 🔊」听单词发音；点击翻译结果卡片底部的「朗读 英 🔊 / 美 🔊」逐句朗读英文，播放中再次点击即停止。
-6. **设置**：在 Zotero「设置 → 墨桥·InkBridge」中修改服务地址（修改后立即生效，可省略 `http://`，清空则恢复默认）、选择词典文件，并可点击「测试连接」检查状态。
+打开 PDF，在右侧条目面板中找到「墨桥·InkBridge」。
 
-## 配置
+- **选中翻译**：在 PDF 中选中文字即自动翻译；也可以在面板底部的输入框中输入。以中文为主的内容会译成英文。
+- **手动翻译与跨页合并**：关闭 `自动` 开关后，选中的文字先放进输入框，按 F 再翻译。再打开 `合并` 开关，可以依次选中上一页末尾和下一页开头，合并后一起翻译；行尾断词（如 `compu-` + `tation`）会自动拼回。
+- **截图翻译**：截图后点击输入框按 Ctrl+V，或把图片拖进面板。自动判断语言：英文截图译成中文，中文截图译成英文。
+- **发音**：词典卡片中单词旁的「英 🔊」「美 🔊」播放单词发音；翻译卡片底部的「朗读」逐句朗读英文，再次点击停止。
+- **不留痕迹**：翻译记录、截图、音频都只保存在内存中，关闭 Zotero 后不保留。
 
-翻译参数都在 `zotero-plugin/bootstrap.js` 顶部，修改后需重新打包：
+## 开发
 
-| 常量                                          | 说明                                                      |
-| --------------------------------------------- | --------------------------------------------------------- |
-| `MODEL_NAME` / `OCR_MODEL_NAME`           | 对应 vLLM 的`--served-model-name`                       |
-| `PROMPT_PREFIX`                             | HY-MT 官方中英翻译提示词模板                              |
-| `OCR_PROMPT`                                | HunyuanOCR 官方`trans_other2zh` 任务提示词              |
-| `SAMPLING` / `OCR_SAMPLING`               | 两个模型的官方推荐采样参数                                |
-| `MIN_OUTPUT_TOKENS` / `MAX_OUTPUT_TOKENS` | 文本翻译输出 token 上下限，实际上限 = 原文字符数 / 2 + 32 |
-| `MAX_INPUT_CHARS`                           | 文本翻译原文截断长度                                      |
-| `OCR_MAX_TOKENS`                            | 截图翻译输出上限（原文 + 译文）                           |
-| `OCR_MAX_SIDE`                              | 截图长边超过该像素时等比缩小                              |
-
-服务地址默认是 `http://127.0.0.1:8001`（翻译）、`http://127.0.0.1:8002`（OCR）和 `http://127.0.0.1:8003`（发音），在 Zotero「设置 → 墨桥·InkBridge」中修改。
-
-## 本地开发
-
-不打包、直接加载源码目录：
-
-1. 在 Zotero 配置目录的 `extensions` 文件夹中，新建一个名为 `InkBridge@maipeng.com` 的文本文件。
-2. 文件内容写入本仓库 `InkBridge` 目录的绝对路径，即 `<仓库目录>/InkBridge`。
-3. 重启 Zotero。修改后若未生效，用 `-purgecaches` 参数启动以清除缓存。
-
-## 目录结构
-
-```text
-Inkbridge.png                 Logo
-tools/
-├── build_ecdict.py           生成查词用的 ECDICT SQLite 词典
-└── tts_server.py             单词发音服务（Kokoro-82M）
-zotero-plugin/
-├── bootstrap.js              插件全部逻辑：面板 UI、选中/截图翻译、查词、发音朗读、流式请求、公式渲染
-├── preferences.xhtml         Zotero「设置 → 墨桥·InkBridge」页面
-├── preferences.js            设置页脚本（测试连接、选择词典）
-├── manifest.json
-├── prefs.js                  默认配置（服务地址、词典路径等）
-├── chrome/
-│   ├── content/lib/          KaTeX（公式渲染）
-│   ├── content/icons/        插件图标（由 Inkbridge.png 裁出的猫头鹰；16/20 为条目面板用的定尺寸图标）
-│   └── skin/                 panel.css 面板样式、prefs.css 设置页样式
-└── locale/
-```
+- **翻译参数**：模型名、提示词、采样参数、长度上限等都是 `zotero-plugin/bootstrap.js` 顶部的常量，修改后重新打包。
+- **直接加载源码**：在 Zotero 配置目录的 `extensions` 文件夹中新建文件 `inkbridge@maipeng.com`（没有扩展名），内容为 `<仓库目录>/zotero-plugin` 的绝对路径，然后重启 Zotero。修改没有生效时，用 `-purgecaches` 参数启动 Zotero。
+- **发布新版本**：修改 `zotero-plugin/manifest.json` 中的 `version`，运行 `python3 tools/build_xpi.py`；在 GitHub 新建 tag 为 `v<版本号>`（如 `v1.2.0`）的 Release，上传 `dist/` 中的 `inkbridge.xpi` 和 `update.json`。Zotero 通过最新 Release 中的 `update.json` 检查更新，所以 tag 格式和文件名都不能改。
 
 ## 许可
 
+本项目采用 [MIT](LICENSE) 许可。第三方组件：
+
 - [KaTeX](https://katex.org/)：MIT，见 `zotero-plugin/chrome/content/lib/KATEX_LICENSE`
-- [ECDICT](https://github.com/skywind3000/ECDICT)：MIT，词典数据不包含在本仓库中，由 `tools/build_ecdict.py` 下载生成
-- [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx)：MIT；[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) 模型权重：Apache-2.0，不包含在本仓库中
-- [HY-MT1.5](https://huggingface.co/tencent/HY-MT1.5-1.8B)、[HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR)：模型权重遵循腾讯混元各自的许可协议
+- [ECDICT](https://github.com/skywind3000/ECDICT)、[kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx)：MIT
+- [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)：Apache-2.0
+- [HY-MT1.5](https://huggingface.co/tencent/HY-MT1.5-1.8B)、[HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR)：遵循腾讯混元各自的许可协议
+
+模型权重和词典数据都不包含在本仓库中。
